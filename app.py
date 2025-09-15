@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import streamlit as st
-from sklearn.cluster import KMeans
+# from sklearn.cluster import KMeans
 from streamlit_image_comparison import image_comparison
 from streamlit_drawable_canvas import st_canvas
 
@@ -36,10 +36,11 @@ def binarize(img, algo, val, roi_mask=None):
         )
 
     elif algo == "K-means 聚类":
-        Z = gray.reshape((-1,1)).astype(np.float32)
-        kmeans = KMeans(n_clusters=2, n_init=10).fit(Z)
-        labels = kmeans.labels_.reshape(gray.shape)
-        binary = (labels * 255).astype("uint8")
+        print("聚类算法暂未实现")
+        # Z = gray.reshape((-1,1)).astype(np.float32)
+        # kmeans = KMeans(n_clusters=2, n_init=10).fit(Z)
+        # labels = kmeans.labels_.reshape(gray.shape)
+        # binary = (labels * 255).astype("uint8")
 
     elif algo == "GrabCut 交互式":
         mask = np.zeros(img.shape[:2], np.uint8)
