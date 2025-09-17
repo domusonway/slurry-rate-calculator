@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image
+import os
+from datetime import datetime
 
 # -------------------------
 # 现在可以安全导入 canvas
@@ -22,7 +24,8 @@ uploaded_file = st.sidebar.file_uploader("上传图像", type=["jpg", "png", "bm
 
 algo = st.sidebar.selectbox(
     "选择二值化算法",
-    ["全局阈值", "Otsu", "自适应阈值", "K-means 聚类", "GrabCut 交互式"]
+    ["Otsu", "全局阈值", "自适应阈值"]
+    # ["全局阈值", "Otsu", "自适应阈值", "K-means 聚类", "GrabCut 交互式"]
 )
 
 thresh_val = st.sidebar.slider("阈值/参数调节", 0, 255, 160)
@@ -101,6 +104,66 @@ def binarize(img, algo, val, roi_mask=None):
     return binary
 
 
+# ========== 结果图生成函数 ==========
+def create_result_image(original_img, binary_img, slurry_rate, filename):
+    """
+    创建结果图：原图和二值化图并排显示，并在图上绘制满浆率信息
+    
+    参数：
+      original_img: 原始图像 (BGR)
+      binary_img: 二值化图像 (单通道)
+      slurry_rate: 满浆率百分比
+      filename: 原始文件名
+    
+    返回：
+      result_img: 组合后的结果图像 (BGR)
+    """
+    # 将二值化图转为三通道
+    binary_bgr = cv2.cvtColor(binary_img, cv2.COLOR_GRAY2BGR)
+    
+    # 获取图像尺寸
+    h, w = original_img.shape[:2]
+    
+    # 创建组合图像：左边原图，右边二值化图
+    result_img = np.zeros((h, w * 2, 3), dtype=np.uint8)
+    result_img[:, :w] = original_img
+    result_img[:, w:] = binary_bgr
+    
+    # 在图像上绘制文本信息
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.8, min(w / 800, 2.0))  # 根据图像宽度调整字体大小
+    thickness = max(1, int(font_scale * 2))
+    
+    # 文本内容
+    text_lines = [
+        f"File: {filename}",
+        f"Slurry Rate: {slurry_rate:.2f}%",
+        f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    ]
+    
+    # 计算文本位置（在图像底部）
+    text_height = 30 * font_scale
+    y_start = h - len(text_lines) * int(text_height) - 10
+    
+    # 绘制黑色背景矩形
+    bg_height = len(text_lines) * int(text_height) + 20
+    cv2.rectangle(result_img, (0, y_start - 10), (w * 2, h), (0, 0, 0), -1)
+    
+    # 绘制文本
+    for i, text in enumerate(text_lines):
+        y_pos = y_start + i * int(text_height)
+        cv2.putText(result_img, text, (10, y_pos), font, font_scale, (255, 255, 255), thickness)
+    
+    # 在中间绘制分割线
+    cv2.line(result_img, (w, 0), (w, h), (255, 255, 255), 2)
+    
+    # 添加标签
+    cv2.putText(result_img, "Original", (10, 30), font, font_scale, (255, 255, 255), thickness)
+    cv2.putText(result_img, "Binary", (w + 10, 30), font, font_scale, (255, 255, 255), thickness)
+    
+    return result_img
+
+
 # ========== 处理与显示 ==========
 if uploaded_file is not None:
     # 读取图像
@@ -175,6 +238,46 @@ if uploaded_file is not None:
     st.markdown("---")
     st.subheader("结果指标")
     st.metric(label="满浆率 (%)", value=f"{full_slurry_rate:.2f}")
+
+    # 生成结果图
+    input_filename = uploaded_file.name
+    result_img = create_result_image(img, binary, full_slurry_rate, input_filename)
+    
+    # 显示结果图
+    st.subheader("结果图")
+    st.image(result_img[:, :, ::-1], caption="原图与二值化结果对比", use_column_width=True)
+    
+    # 保存按钮
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("保存结果图", type="primary"):
+            # 生成保存文件名
+            base_name = os.path.splitext(input_filename)[0]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_filename = f"{base_name}_result_{timestamp}.jpg"
+            save_path = os.path.join("temp", save_filename)
+            
+            # 确保temp目录存在
+            os.makedirs("temp", exist_ok=True)
+            
+            # 保存图像
+            success = cv2.imwrite(save_path, result_img)
+            if success:
+                st.success(f"结果图已保存至: {save_path}")
+                
+                # 提供下载链接
+                with open(save_path, "rb") as file:
+                    btn = st.download_button(
+                        label="下载结果图",
+                        data=file.read(),
+                        file_name=save_filename,
+                        mime="image/jpeg"
+                    )
+            else:
+                st.error("保存失败，请检查文件路径权限")
+    
+    with col2:
+        st.write("")  # 占位符
 
     # 可视化：把二值 mask 以半透明红色叠加到原图上
     try:
