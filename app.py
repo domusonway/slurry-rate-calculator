@@ -247,36 +247,43 @@ if uploaded_file is not None:
     st.subheader("结果图")
     st.image(result_img[:, :, ::-1], caption="原图与二值化结果对比", use_column_width=True)
     
-    # 保存按钮
-    col1, col2 = st.columns([1, 4])
+    # 保存和下载功能
+    col1, col2, col3 = st.columns([1, 1, 3])
+    
+    # 生成结果图数据
+    input_filename = uploaded_file.name
+    base_name = os.path.splitext(input_filename)[0]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_filename = f"{base_name}_result_{timestamp}.jpg"
+    
+    # 将结果图编码为字节数据
+    _, buffer = cv2.imencode('.jpg', result_img)
+    img_bytes = buffer.tobytes()
+    
     with col1:
-        if st.button("保存结果图", type="primary"):
-            # 生成保存文件名
-            base_name = os.path.splitext(input_filename)[0]
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_filename = f"{base_name}_result_{timestamp}.jpg"
-            save_path = os.path.join("temp", save_filename)
-            
-            # 确保temp目录存在
-            os.makedirs("temp", exist_ok=True)
-            
-            # 保存图像
-            success = cv2.imwrite(save_path, result_img)
-            if success:
-                st.success(f"结果图已保存至: {save_path}")
-                
-                # 提供下载链接
-                with open(save_path, "rb") as file:
-                    btn = st.download_button(
-                        label="下载结果图",
-                        data=file.read(),
-                        file_name=save_filename,
-                        mime="image/jpeg"
-                    )
-            else:
-                st.error("保存失败，请检查文件路径权限")
+        # 直接下载按钮（推荐）
+        st.download_button(
+            label="📥 下载结果图",
+            data=img_bytes,
+            file_name=save_filename,
+            mime="image/jpeg",
+            type="primary",
+            help="直接下载到浏览器默认下载文件夹"
+        )
     
     with col2:
+        # 保存到服务器temp目录的按钮
+        if st.button("💾 保存到服务器", help="保存到应用服务器的temp目录"):
+            save_path = os.path.join("temp", save_filename)
+            os.makedirs("temp", exist_ok=True)
+            
+            success = cv2.imwrite(save_path, result_img)
+            if success:
+                st.success(f"✅ 已保存至服务器: {save_path}")
+            else:
+                st.error("❌ 保存失败，请检查文件路径权限")
+    
+    with col3:
         st.write("")  # 占位符
 
     # 可视化：把二值 mask 以半透明红色叠加到原图上
