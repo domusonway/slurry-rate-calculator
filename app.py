@@ -56,6 +56,13 @@ tile_type = st.sidebar.selectbox(
     ["黑胶白砖", "白胶黑砖"]
 )
 
+# 添加测试项描述输入框
+test_description = st.sidebar.text_input(
+    "测试项描述",
+    value="满浆率检测",
+    help="输入测试项目的描述信息，将显示在结果图像上"
+)
+
 # ========== 图像拍摄注意事项 ==========
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📸 图像拍摄注意事项")
@@ -169,7 +176,7 @@ def binarize(img, algo, val, roi_mask=None):
 
 
 # ========== 结果图生成函数 ==========
-def create_result_image(original_img, binary_img, slurry_rate, filename):
+def create_result_image(original_img, binary_img, slurry_rate, filename, test_description="满浆率检测"):
     """
     创建结果图：原图和二值化图并排显示，并在图上绘制满浆率信息
     
@@ -178,6 +185,7 @@ def create_result_image(original_img, binary_img, slurry_rate, filename):
       binary_img: 二值化图像 (单通道)
       slurry_rate: 满浆率百分比
       filename: 原始文件名
+      test_description: 测试项描述
     
     返回：
       result_img: 组合后的结果图像 (BGR)
@@ -193,38 +201,72 @@ def create_result_image(original_img, binary_img, slurry_rate, filename):
     result_img[:, :w] = original_img
     result_img[:, w:] = binary_bgr
     
-    # 在图像上绘制文本信息
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = max(0.8, min(w / 800, 2.0))  # 根据图像宽度调整字体大小
-    thickness = max(1, int(font_scale * 2))
+    # 使用PIL绘制支持中文的文本信息
+    from PIL import Image, ImageDraw, ImageFont
+    
+    # 将OpenCV图像转换为PIL图像
+    pil_img = Image.fromarray(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    
+    # 设置字体大小
+    font_size = max(20, min(w // 40, 40))  # 根据图像宽度调整字体大小
+    try:
+        # 尝试使用系统中文字体
+        font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", font_size)  # 微软雅黑
+    except:
+        try:
+            font = ImageFont.truetype("C:/Windows/Fonts/simsun.ttc", font_size)  # 宋体
+        except:
+            font = ImageFont.load_default()  # 默认字体
     
     # 文本内容
     text_lines = [
+        f"Test: {test_description}",
         f"File: {filename}",
         f"Slurry Rate: {slurry_rate:.2f}%",
         f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     ]
     
     # 计算文本位置（在图像底部）
-    text_height = 30 * font_scale
-    y_start = h - len(text_lines) * int(text_height) - 10
+    line_height = font_size + 5
+    y_start = h - len(text_lines) * line_height - 10
     
     # 绘制黑色背景矩形
-    bg_height = len(text_lines) * int(text_height) + 20
-    cv2.rectangle(result_img, (0, y_start - 10), (w * 2, h), (0, 0, 0), -1)
+    bg_height = len(text_lines) * line_height + 10
+    # draw.rectangle([(0, y_start - 5), (w * 2, h)], fill=(0, 0, 0, 180))
     
     # 绘制文本
     for i, text in enumerate(text_lines):
-        y_pos = y_start + i * int(text_height)
-        cv2.putText(result_img, text, (10, y_pos), font, font_scale, (255, 255, 255), thickness)
+        y_pos = y_start + i * line_height
+        draw.text((10, y_pos), text, font=font, fill=(255, 255, 255))
+    
+    # 将PIL图像转换回OpenCV格式
+    result_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     
     # 在中间绘制分割线
     cv2.line(result_img, (w, 0), (w, h), (255, 255, 255), 2)
     
-    # 添加标签
-    cv2.putText(result_img, "Original", (10, 30), font, font_scale, (255, 255, 255), thickness)
-    cv2.putText(result_img, "Binary", (w + 10, 30), font, font_scale, (255, 255, 255), thickness)
+    # 使用PIL添加标签
+    pil_img_labels = Image.fromarray(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
+    draw_labels = ImageDraw.Draw(pil_img_labels)
     
+    # 设置标签字体
+    label_font_size = max(24, min(w // 30, 48))
+    try:
+        label_font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", label_font_size)
+    except:
+        try:
+            label_font = ImageFont.truetype("C:/Windows/Fonts/simsun.ttc", label_font_size)
+        except:
+            label_font = ImageFont.load_default()
+    
+    # 添加标签
+    draw_labels.text((10, 10), "Original", font=label_font, fill=(255, 0, 0))
+    draw_labels.text((w + 10, 10), "Binary", font=label_font, fill=(0, 255, 0))
+    
+    # 转换回OpenCV格式
+    result_img = cv2.cvtColor(np.array(pil_img_labels), cv2.COLOR_RGB2BGR)
+
     return result_img
 
 
@@ -305,7 +347,7 @@ if uploaded_file is not None:
 
     # 生成结果图
     input_filename = uploaded_file.name
-    result_img = create_result_image(img, binary, full_slurry_rate, input_filename)
+    result_img = create_result_image(img, binary, full_slurry_rate, input_filename, test_description)
     
     # 显示结果图
     st.subheader("结果图")
@@ -356,6 +398,52 @@ if uploaded_file is not None:
         mask_bool = (binary == 255)
         overlay[mask_bool] = (0, 255, 0)  # 绿色 BGR
         blended = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
+        
+        # 在叠加图上绘制文本信息（使用PIL支持中文）
+        h, w = blended.shape[:2]
+        
+        # 使用PIL绘制支持中文的文本信息
+        from PIL import Image, ImageDraw, ImageFont
+        
+        # 将OpenCV图像转换为PIL图像
+        pil_img = Image.fromarray(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+        
+        # 设置字体大小
+        font_size = max(20, min(w // 40, 40))  # 根据图像宽度调整字体大小
+        try:
+            # 尝试使用系统中文字体
+            font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", font_size)  # 微软雅黑
+        except:
+            try:
+                font = ImageFont.truetype("C:/Windows/Fonts/simsun.ttc", font_size)  # 宋体
+            except:
+                font = ImageFont.load_default()  # 默认字体
+        
+        # 文本内容
+        text_lines = [
+            f"Test: {test_description}",
+            f"File: {uploaded_file.name}",
+            f"Slurry Rate: {full_slurry_rate:.2f}%",
+            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        ]
+        
+        # 计算文本位置（在图像底部）
+        line_height = font_size + 5
+        y_start = h - len(text_lines) * line_height - 10
+        
+        # 绘制黑色背景矩形
+        bg_height = len(text_lines) * line_height + 10
+        # draw.rectangle([(0, y_start - 5), (w, h)], fill=(0, 0, 0, 180))
+        
+        # 绘制文本
+        for i, text in enumerate(text_lines):
+            y_pos = y_start + i * line_height
+            draw.text((10, y_pos), text, font=font, fill=(255, 255, 255))
+        
+        # 将PIL图像转换回OpenCV格式
+        blended = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        
         st.image(blended[:, :, ::-1], caption="满浆掩码叠加 (半透明红)", use_column_width=True)
         
         # 为叠加图添加下载按钮
@@ -384,7 +472,7 @@ if uploaded_file is not None:
         
         with col2_overlay:
             # 保存到服务器temp目录的按钮
-            if st.button("💾 保存叠加图到服务器", help="保存叠加图到应用服务器的temp目录"):
+            if st.button("💾 保存到服务器", help="保存叠加图到应用服务器的temp目录"):
                 save_path = os.path.join("temp", overlay_filename)
                 os.makedirs("temp", exist_ok=True)
                 
