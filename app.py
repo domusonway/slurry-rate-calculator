@@ -208,8 +208,10 @@ def create_result_image(original_img, binary_img, slurry_rate, filename, test_de
     pil_img = Image.fromarray(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil_img)
     
-    # 设置字体大小
-    font_size = max(20, min(w // 40, 40))  # 根据图像宽度调整字体大小
+    # 设置字体大小 - 使用固定基准大小，不依赖图像尺寸
+    base_font_size = 32  # 基准字体大小
+    # 可选：根据图像大小进行适度调整，但设置更合理的范围
+    font_size = max(28, min(base_font_size + (w - 800) // 100, 48))
     try:
         # 尝试使用系统中文字体
         font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", font_size)  # 微软雅黑
@@ -250,8 +252,9 @@ def create_result_image(original_img, binary_img, slurry_rate, filename, test_de
     pil_img_labels = Image.fromarray(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
     draw_labels = ImageDraw.Draw(pil_img_labels)
     
-    # 设置标签字体
-    label_font_size = max(24, min(w // 30, 48))
+    # 设置标签字体 - 使用固定基准大小
+    base_label_font_size = 36  # 标签基准字体大小
+    label_font_size = max(32, min(base_label_font_size + (w - 800) // 80, 52))
     try:
         label_font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", label_font_size)
     except:
@@ -409,8 +412,10 @@ if uploaded_file is not None:
         pil_img = Image.fromarray(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil_img)
         
-        # 设置字体大小
-        font_size = max(20, min(w // 40, 40))  # 根据图像宽度调整字体大小
+        # 设置字体大小 - 使用固定基准大小，不依赖图像尺寸
+        base_font_size = 32  # 基准字体大小
+        # 可选：根据图像大小进行适度调整，但设置更合理的范围
+        font_size = max(28, min(base_font_size + (w - 800) // 100, 48))
         try:
             # 尝试使用系统中文字体
             font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", font_size)  # 微软雅黑
