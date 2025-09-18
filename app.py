@@ -212,14 +212,60 @@ def create_result_image(original_img, binary_img, slurry_rate, filename, test_de
     base_font_size = 32  # 基准字体大小
     # 可选：根据图像大小进行适度调整，但设置更合理的范围
     font_size = max(28, min(base_font_size + (w - 800) // 100, 48))
-    try:
-        # 尝试使用系统中文字体
-        font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", font_size)  # 微软雅黑
-    except:
+    
+    # 跨平台字体加载
+    import platform
+    import os
+    
+    font = None
+    system = platform.system()
+    
+    # 定义不同系统的字体路径和字体文件
+    font_paths = []
+    if system == "Windows":
+        font_paths = [
+            "C:/Windows/Fonts/msyh.ttc",  # 微软雅黑
+            "C:/Windows/Fonts/simsun.ttc",  # 宋体
+            "C:/Windows/Fonts/arial.ttf",  # Arial
+        ]
+    elif system == "Darwin":  # macOS
+        font_paths = [
+            "/System/Library/Fonts/PingFang.ttc",  # 苹方
+            "/System/Library/Fonts/Arial.ttf",  # Arial
+            "/System/Library/Fonts/Helvetica.ttc",  # Helvetica
+        ]
+    else:  # Linux (包括云端部署环境)
+        font_paths = [
+            # 常见的Linux字体路径
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # DejaVu Sans
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",  # Liberation Sans
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",  # Noto Sans CJK
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",  # Noto Sans CJK (备用路径)
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",  # Ubuntu字体
+            "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf",  # Droid Sans Fallback
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",  # 文泉驿微米黑
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",  # 文泉驿正黑
+            # 云端部署环境可能的字体路径
+            "/app/.fonts/NotoSansCJK-Regular.ttc",  # 自定义字体目录
+            "/tmp/fonts/NotoSansCJK-Regular.ttc",  # 临时字体目录
+            # 更多备用选项
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
+            "/System/Library/Fonts/Arial.ttf",  # 某些Linux发行版可能有
+        ]
+    
+    # 尝试加载字体
+    for font_path in font_paths:
         try:
-            font = ImageFont.truetype("C:/Windows/Fonts/simsun.ttc", font_size)  # 宋体
-        except:
-            font = ImageFont.load_default()  # 默认字体
+            if os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, font_size)
+                break
+        except Exception:
+            continue
+    
+    # 如果所有字体都加载失败，使用默认字体
+    if font is None:
+        font = ImageFont.load_default()
     
     # 文本内容
     text_lines = [
@@ -255,13 +301,22 @@ def create_result_image(original_img, binary_img, slurry_rate, filename, test_de
     # 设置标签字体 - 使用固定基准大小
     base_label_font_size = 36  # 标签基准字体大小
     label_font_size = max(32, min(base_label_font_size + (w - 800) // 80, 52))
-    try:
-        label_font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", label_font_size)
-    except:
+    
+    # 跨平台标签字体加载
+    label_font = None
+    
+    # 尝试加载字体
+    for font_path in font_paths:
         try:
-            label_font = ImageFont.truetype("C:/Windows/Fonts/simsun.ttc", label_font_size)
-        except:
-            label_font = ImageFont.load_default()
+            if os.path.exists(font_path):
+                label_font = ImageFont.truetype(font_path, label_font_size)
+                break
+        except Exception:
+            continue
+    
+    # 如果所有字体都加载失败，使用默认字体
+    if label_font is None:
+        label_font = ImageFont.load_default()
     
     # 添加标签
     draw_labels.text((10, 10), "Original", font=label_font, fill=(255, 0, 0))
@@ -416,14 +471,24 @@ if uploaded_file is not None:
         base_font_size = 32  # 基准字体大小
         # 可选：根据图像大小进行适度调整，但设置更合理的范围
         font_size = max(28, min(base_font_size + (w - 800) // 100, 48))
-        try:
-            # 尝试使用系统中文字体
-            font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", font_size)  # 微软雅黑
-        except:
+        
+        # 跨平台叠加图字体加载
+        overlay_font = None
+        
+        # 尝试加载字体
+        for font_path in font_paths:
             try:
-                font = ImageFont.truetype("C:/Windows/Fonts/simsun.ttc", font_size)  # 宋体
-            except:
-                font = ImageFont.load_default()  # 默认字体
+                if os.path.exists(font_path):
+                    overlay_font = ImageFont.truetype(font_path, font_size)
+                    break
+            except Exception:
+                continue
+        
+        # 如果所有字体都加载失败，使用默认字体
+        if overlay_font is None:
+            overlay_font = ImageFont.load_default()
+        
+        font = overlay_font  # 保持原变量名兼容性
         
         # 文本内容
         text_lines = [
