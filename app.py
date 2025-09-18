@@ -87,6 +87,18 @@ with st.sidebar.expander("💡 最佳实践"):
     - **完整性**：确保砖面完整无遮挡
     """)
 
+# 添加收款码图片到侧边栏最下方
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 💝 支持开发")
+try:
+    qr_image_path = "img/赞赏码.jpg"
+    if os.path.exists(qr_image_path):
+        st.sidebar.image(qr_image_path, caption="如果这个工具对您有帮助，欢迎赞赏支持！", use_column_width=True)
+    else:
+        st.sidebar.info("💡 如果这个工具对您有帮助，欢迎支持开发！")
+except Exception:
+    st.sidebar.info("💡 如果这个工具对您有帮助，欢迎支持开发！")
+
 # ========== 二值化函数 ==========
 def binarize(img, algo, val, roi_mask=None):
     """
@@ -345,6 +357,46 @@ if uploaded_file is not None:
         overlay[mask_bool] = (0, 255, 0)  # 绿色 BGR
         blended = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
         st.image(blended[:, :, ::-1], caption="满浆掩码叠加 (半透明红)", use_column_width=True)
+        
+        # 为叠加图添加下载按钮
+        overlay_filename = f"overlay_{timestamp}.jpg"
+        
+        # 将叠加图编码为字节数据
+        overlay_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
+        overlay_pil = Image.fromarray(overlay_rgb)
+        overlay_buffer = io.BytesIO()
+        overlay_pil.save(overlay_buffer, format='JPEG', quality=95)
+        overlay_bytes = overlay_buffer.getvalue()
+        
+        # 创建两列布局
+        col1_overlay, col2_overlay, col3_overlay = st.columns([1, 1, 2])
+        
+        with col1_overlay:
+            # 直接下载按钮（推荐）
+            st.download_button(
+                label="📥 下载叠加图",
+                data=overlay_bytes,
+                file_name=overlay_filename,
+                mime="image/jpeg",
+                type="secondary",
+                help="直接下载叠加图到浏览器默认下载文件夹"
+            )
+        
+        with col2_overlay:
+            # 保存到服务器temp目录的按钮
+            if st.button("💾 保存叠加图到服务器", help="保存叠加图到应用服务器的temp目录"):
+                save_path = os.path.join("temp", overlay_filename)
+                os.makedirs("temp", exist_ok=True)
+                
+                success = cv2.imwrite(save_path, blended)
+                if success:
+                    st.success(f"✅ 叠加图已保存至服务器: {save_path}")
+                else:
+                    st.error("❌ 叠加图保存失败，请检查文件路径权限")
+        
+        with col3_overlay:
+            st.write("")  # 占位符
+            
     except Exception:
         pass
 
