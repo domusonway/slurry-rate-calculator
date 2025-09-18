@@ -100,7 +100,7 @@ st.sidebar.markdown("### 💝 支持开发")
 try:
     qr_image_path = "img/赞赏码.jpg"
     if os.path.exists(qr_image_path):
-        st.sidebar.image(qr_image_path, caption="如果这个工具对您有帮助，欢迎赞赏支持！", use_column_width=True)
+        st.sidebar.image(qr_image_path, caption="如果这个工具对您有帮助，欢迎赞赏支持！", width="stretch")
     else:
         st.sidebar.info("💡 如果这个工具对您有帮助，欢迎支持开发！")
 except Exception:
@@ -388,8 +388,8 @@ if uploaded_file is not None:
         )
     except Exception:
         # 退回到简单显示
-        st.image(img[:, :, ::-1], caption="Before", use_column_width=True)
-        st.image(cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB), caption="After", use_column_width=True)
+        st.image(img[:, :, ::-1], caption="Before", width="stretch")
+        st.image(cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB), caption="After", width="stretch")
 
     total_pixels = binary.size
     if total_pixels == 0:
@@ -409,7 +409,7 @@ if uploaded_file is not None:
     
     # 显示结果图
     st.subheader("结果图")
-    st.image(result_img[:, :, ::-1], caption="原图与二值化结果对比", use_column_width=True)
+    st.image(result_img[:, :, ::-1], caption="原图与二值化结果对比", use_container_width=True)
     
     # 保存和下载功能
     col1, col2, col3 = st.columns([1, 1, 3])
@@ -475,8 +475,46 @@ if uploaded_file is not None:
         # 跨平台叠加图字体加载
         overlay_font = None
         
+        # 重新定义字体路径（因为之前的font_paths在函数作用域外）
+        import platform
+        system = platform.system()
+        
+        # 定义不同系统的字体路径和字体文件
+        overlay_font_paths = []
+        if system == "Windows":
+            overlay_font_paths = [
+                "C:/Windows/Fonts/msyh.ttc",  # 微软雅黑
+                "C:/Windows/Fonts/simsun.ttc",  # 宋体
+                "C:/Windows/Fonts/arial.ttf",  # Arial
+            ]
+        elif system == "Darwin":  # macOS
+            overlay_font_paths = [
+                "/System/Library/Fonts/PingFang.ttc",  # 苹方
+                "/System/Library/Fonts/Arial.ttf",  # Arial
+                "/System/Library/Fonts/Helvetica.ttc",  # Helvetica
+            ]
+        else:  # Linux (包括云端部署环境)
+            overlay_font_paths = [
+                # 常见的Linux字体路径
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # DejaVu Sans
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",  # Liberation Sans
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",  # Noto Sans CJK
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",  # Noto Sans CJK (备用路径)
+                "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",  # Ubuntu字体
+                "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf",  # Droid Sans Fallback
+                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",  # 文泉驿微米黑
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",  # 文泉驿正黑
+                # 云端部署环境可能的字体路径
+                "/app/.fonts/NotoSansCJK-Regular.ttc",  # 自定义字体目录
+                "/tmp/fonts/NotoSansCJK-Regular.ttc",  # 临时字体目录
+                # 更多备用选项
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
+                "/System/Library/Fonts/Arial.ttf",  # 某些Linux发行版可能有
+            ]
+        
         # 尝试加载字体
-        for font_path in font_paths:
+        for font_path in overlay_font_paths:
             try:
                 if os.path.exists(font_path):
                     overlay_font = ImageFont.truetype(font_path, font_size)
@@ -514,7 +552,7 @@ if uploaded_file is not None:
         # 将PIL图像转换回OpenCV格式
         blended = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         
-        st.image(blended[:, :, ::-1], caption="满浆掩码叠加 (半透明红)", use_column_width=True)
+        st.image(blended[:, :, ::-1], caption="满浆掩码叠加 (半透明红)", use_container_width=True)
         
         # 为叠加图添加下载按钮
         overlay_filename = f"overlay_{timestamp}.jpg"
@@ -555,8 +593,9 @@ if uploaded_file is not None:
         with col3_overlay:
             st.write("")  # 占位符
             
-    except Exception:
-        pass
+    except Exception as e:
+        st.error(f"❌ 叠加图生成失败: {str(e)}")
+        st.error("请检查图像处理过程中是否出现错误")
 
 else:
     st.info("请在左侧上传图像以开始。")
