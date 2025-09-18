@@ -409,7 +409,7 @@ if uploaded_file is not None:
     
     # 显示结果图
     st.subheader("结果图")
-    st.image(result_img[:, :, ::-1], caption="原图与二值化结果对比", use_container_width=True)
+    st.image(result_img[:, :, ::-1], caption="原图与二值化结果对比", width="stretch")
     
     # 保存和下载功能
     col1, col2, col3 = st.columns([1, 1, 3])
@@ -552,7 +552,7 @@ if uploaded_file is not None:
         # 将PIL图像转换回OpenCV格式
         blended = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         
-        st.image(blended[:, :, ::-1], caption="满浆掩码叠加 (半透明红)", use_container_width=True)
+        st.image(blended[:, :, ::-1], caption="满浆掩码叠加 (半透明红)", width="stretch")
         
         # 为叠加图添加下载按钮
         overlay_filename = f"overlay_{timestamp}.jpg"
