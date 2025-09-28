@@ -7,6 +7,10 @@ import streamlit as st
 from PIL import Image
 import os
 from datetime import datetime
+import smtplib
+from email.message import EmailMessage
+import mimetypes
+import platform
 
 # -------------------------
 # 现在可以安全导入 canvas
@@ -135,6 +139,128 @@ try:
         st.sidebar.info("💡 如果这个工具对您有帮助，欢迎支持开发！")
 except Exception:
     st.sidebar.info("💡 如果这个工具对您有帮助，欢迎支持开发！")
+
+# ========== 使用反馈 ==========
+def _get_smtp_config():
+    cfg = None
+    try:
+        cfg = st.secrets.get("smtp", None)
+    except Exception:
+        cfg = None
+    if not cfg:
+        return None
+    host = cfg.get("host")
+    port = int(cfg.get("port", 587))
+    user = cfg.get("user")
+    password = cfg.get("password")
+    from_addr = cfg.get("from", user)
+    use_tls = bool(cfg.get("tls", True))
+    if host and port and user and password and from_addr:
+        return {
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "from": from_addr,
+            "tls": use_tls,
+        }
+    return None
+
+def _send_feedback_email(subject, body_text, to_addr, attachments=None):
+    attachments = attachments or []
+    smtp_cfg = _get_smtp_config()
+    if not smtp_cfg:
+        return False, "SMTP未配置（st.secrets['smtp']），已写入本地日志。"
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = smtp_cfg["from"]
+        msg["To"] = to_addr
+        msg.set_content(body_text)
+
+        for att in attachments:
+            name, data = att
+            ctype, _ = mimetypes.guess_type(name)
+            if ctype is None:
+                ctype = "application/octet-stream"
+            maintype, subtype = ctype.split("/", 1)
+            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
+
+        with smtplib.SMTP(smtp_cfg["host"], smtp_cfg["port"]) as server:
+            if smtp_cfg["tls"]:
+                server.starttls()
+            server.login(smtp_cfg["user"], smtp_cfg["password"])
+            server.send_message(msg)
+        return True, "反馈邮件已发送"
+    except Exception as e:
+        return False, f"邮件发送失败：{e}"
+
+def _save_feedback_log(entry, attachments=None):
+    try:
+        os.makedirs("temp/feedback", exist_ok=True)
+        log_path = os.path.join("temp/feedback", "feedback_log.csv")
+        header_needed = not os.path.exists(log_path)
+        with open(log_path, "a", encoding="utf-8") as f:
+            if header_needed:
+                f.write("timestamp,type,name,email,message,platform,python_version,streamlit_version\n")
+            f.write(
+                f"{entry['timestamp']},{entry['type']},{entry['name']},{entry['email']},"
+                f"{entry['message'].replace(',', ';')},{entry['platform']},{entry['python_version']},{entry['st_version']}\n"
+            )
+        # 保存附件（如果有）
+        ts = entry["timestamp"]
+        for idx, att in enumerate(attachments or []):
+            name, data = att
+            safe_name = f"{ts}_{idx+1}_{os.path.basename(name)}"
+            with open(os.path.join("temp/feedback", safe_name), "wb") as af:
+                af.write(data)
+        return True
+    except Exception:
+        return False
+
+with st.sidebar.expander("💬 使用反馈", expanded=False):
+    with st.form("feedback_form"):
+        fb_type = st.selectbox("反馈类型", ["功能建议", "问题报告", "界面体验", "其他"], index=0)
+        fb_name = st.text_input("您的称呼（可选）")
+        fb_email = st.text_input("联系邮箱（可选）")
+        fb_msg = st.text_area("反馈内容", placeholder="请尽量详细描述使用场景、步骤和期望效果")
+        fb_imgs = st.file_uploader("上传截图（可选，支持多张）", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+        submitted = st.form_submit_button("发送反馈")
+    if submitted:
+        if not fb_msg or len(fb_msg.strip()) < 5:
+            st.warning("请填写更完整的反馈内容（至少5个字符）。")
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            sys_info = f"平台: {platform.platform()}\nPython: {platform.python_version()}\nStreamlit: {st.__version__}"
+            subject = f"满浆率工具使用反馈 - {fb_type}"
+            body = (
+                f"时间: {ts}\n类型: {fb_type}\n称呼: {fb_name}\n联系邮箱: {fb_email}\n\n"
+                f"反馈内容:\n{fb_msg}\n\n{sys_info}\n"
+            )
+            atts = []
+            for f in fb_imgs or []:
+                try:
+                    atts.append((f.name, f.read()))
+                except Exception:
+                    continue
+
+            entry = {
+                "timestamp": ts,
+                "type": fb_type,
+                "name": fb_name.replace(',', ';'),
+                "email": fb_email.replace(',', ';'),
+                "message": fb_msg.strip(),
+                "platform": platform.platform(),
+                "python_version": platform.python_version(),
+                "st_version": st.__version__,
+            }
+
+            ok, msg = _send_feedback_email(subject, body, "guozhu_l@163.com", attachments=atts)
+            _save_feedback_log(entry, atts)
+            if ok:
+                st.success("✅ 反馈已发送，感谢您的支持！")
+            else:
+                st.warning(f"⚠️ {msg}")
 
 # ========== 二值化函数 ==========
 def binarize(img, algo, val, roi_mask=None):
@@ -586,7 +712,8 @@ if input_mode == "单文件":
             st.image(blended[:, :, ::-1], caption="满浆掩码叠加 (半透明红)", width="stretch")
             
             # 为叠加图添加下载按钮
-            overlay_filename = f"overlay_{timestamp}.jpg"
+            # 使用原图文件名作为前缀，保持与原图一致
+            overlay_filename = f"{base_name}_overlay_{timestamp}.jpg"
             
             # 将叠加图编码为字节数据
             overlay_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
