@@ -1,670 +1,954 @@
-from __future__ import annotations
-
-import csv
-import hashlib
+# app.py
 import io
-import json
-import mimetypes
-import os
-import platform
-import re
-import smtplib
-import zipfile
-from datetime import datetime
-from email.message import EmailMessage
-from pathlib import Path
-from typing import Any
-
+import base64
 import cv2
 import numpy as np
 import streamlit as st
+from PIL import Image
+import os
+from datetime import datetime
+import smtplib
+from email.message import EmailMessage
+import mimetypes
+import platform
 
-from segmentation import colorize_regions, coverage_percent, prepare_multisegment, segment_image
+# -------------------------
+# 现在可以安全导入 canvas
+# -------------------------
+from streamlit_image_comparison import image_comparison
+from streamlit_drawable_canvas import st_canvas
 
+# 页面配置
+st.set_page_config(layout="wide")
 
-APP_TITLE = "满浆率计算"
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-PROFILE_DIR = Path("temp/profiles")
-MAX_QUEUE_IMAGES = 200
-MAX_ARCHIVE_MEMBER_BYTES = 80 * 1024 * 1024
+# 标题和文档入口
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.title("满浆率计算")
+with col2:
+    st.write("")  # 添加一些垂直空间
+    if st.button("📖 使用手册", help="查看详细使用说明"):
+        # 读取并显示用户手册
+        try:
+            with open("user_manual.md", "r", encoding="utf-8") as f:
+                manual_content = f.read()
+            
+            # 在侧边栏显示手册
+            with st.sidebar:
+                st.markdown("---")
+                st.markdown("## 📖 使用手册")
+                st.markdown(manual_content)
+        except FileNotFoundError:
+            st.error("用户手册文件未找到")
+        except Exception as e:
+            st.error(f"读取手册失败: {e}")
 
-st.set_page_config(page_title=APP_TITLE, page_icon="🧱", layout="wide")
-st.markdown(
-    """
-    <style>
-      .block-container {padding-top: 1.6rem; padding-bottom: 3rem;}
-      [data-testid="stMetric"] {background:#f7f9fc;border:1px solid #e5eaf1;border-radius:14px;padding:12px 16px;}
-      [data-testid="stSidebar"] hr {margin: 1rem 0;}
-      .queue-hint {color:#607083;font-size:.88rem;line-height:1.55;}
-      .step-strip {padding:.7rem 1rem;border-radius:12px;background:linear-gradient(90deg,#edf7ff,#f5fbf8);border:1px solid #d9ebf5;margin-bottom:1rem;}
-    </style>
-    """,
-    unsafe_allow_html=True,
+# ========== 左侧控制面板 ==========
+st.sidebar.header("输入")
+input_mode = st.sidebar.radio("输入模式", ["单文件", "文件夹"], index=0)
+uploaded_file = None
+batch_images = None
+batch_zip = None
+start_batch = False
+
+# 批处理结果持久化（避免点击下载导致重渲染后按钮消失）
+if "batch_results" not in st.session_state:
+    st.session_state["batch_results"] = None
+if "batch_saved_files" not in st.session_state:
+    st.session_state["batch_saved_files"] = None
+if "batch_timestamp" not in st.session_state:
+    st.session_state["batch_timestamp"] = None
+if "batch_output_dir" not in st.session_state:
+    st.session_state["batch_output_dir"] = None
+
+if input_mode == "单文件":
+    uploaded_file = st.sidebar.file_uploader("上传图像", type=["jpg", "jpeg", "png", "bmp"])
+else:
+    batch_images = st.sidebar.file_uploader(
+        "批量上传图像",
+        type=["jpg", "jpeg", "png", "bmp"],
+        accept_multiple_files=True,
+        help="选择或拖拽多张图片进行批处理"
+    )
+    batch_zip = st.sidebar.file_uploader(
+        "或上传 ZIP 压缩包",
+        type=["zip"],
+        help="上传包含图片的ZIP压缩包"
+    )
+    start_batch = st.sidebar.button("开始批处理")
+
+algo = st.sidebar.selectbox(
+    "选择二值化算法",
+    ["Otsu", "全局阈值", "自适应阈值"]
+    # ["全局阈值", "Otsu", "自适应阈值", "K-means 聚类", "GrabCut 交互式"]
 )
 
+thresh_val = st.sidebar.slider("阈值/参数调节", 0, 255, 160)
 
-def _apply_pending_profile() -> None:
-    pending = st.session_state.pop("pending_multisegment_profile", None)
-    if not pending:
-        return
-    max_regions = int(pending.get("max_regions", 6))
-    mode = pending.get("application_mode", "fixed")
-    st.session_state["multi_max_regions"] = max_regions
-    st.session_state["multi_application_mode"] = "固定阈值" if mode == "fixed" else "相对自动阈值偏移"
-    prefix = "multi_fixed" if mode == "fixed" else "multi_relative"
-    for region_id, value in pending.get("region_values", {}).items():
-        st.session_state[f"{prefix}_{max_regions}_{region_id}"] = int(round(float(value)))
-    st.session_state["profile_name"] = pending.get("name", "默认多段标准")
-    st.session_state["profile_loaded_notice"] = pending.get("name", "参数标准")
+tile_type = st.sidebar.selectbox(
+    "瓷砖类型",
+    ["黑胶白砖", "白胶黑砖"]
+)
 
+# 添加测试项描述输入框
+test_description = st.sidebar.text_input(
+    "测试项描述",
+    value="满浆率检测",
+    help="输入测试项目的描述信息，将显示在结果图像上"
+)
 
-_apply_pending_profile()
-for state_key, default_value in {"selected_image_id": None, "analysis_bundle": None}.items():
-    if state_key not in st.session_state:
-        st.session_state[state_key] = default_value
+# ========== 图像拍摄注意事项 ==========
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📸 图像拍摄注意事项")
 
+with st.sidebar.expander("⚠️ 重要提示", expanded=True):
+    st.markdown("""
+    **拍摄要求：**
+    
+    1. **📐 保持平行**
+       - 拍摄时与砖面尽可能平行
+       - 避免倾斜角度影响精度
+    
+    2. **💡 光线充足**  
+       - 拍摄光线保持明亮
+       - 胶面无明显阴影
+    
+    3. **✂️ 图像裁剪**
+       - 输入图像要做裁剪
+       - 确保仅包含砖的部分
+       - 不要包含任何背景
+    """)
 
-def _decode_image(data: bytes) -> np.ndarray | None:
-    cache = st.session_state.setdefault("_decoded_image_cache", {})
-    cache_key = hashlib.sha1(data).hexdigest()
-    if cache_key not in cache:
-        cache[cache_key] = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-        while len(cache) > 24:
-            cache.pop(next(iter(cache)))
-    return cache[cache_key]
+with st.sidebar.expander("💡 最佳实践"):
+    st.markdown("""
+    - **分辨率**：建议800x600以上
+    - **格式**：推荐JPG格式
+    - **对比度**：确保胶浆与瓷砖颜色对比明显
+    - **清晰度**：避免模糊和抖动
+    - **完整性**：确保砖面完整无遮挡
+    """)
 
-
-def _prepare_multi_cached(data: bytes, max_regions: int) -> tuple[np.ndarray, np.ndarray, list[float]]:
-    cache = st.session_state.setdefault("_multisegment_preparation_cache", {})
-    cache_key = f"{hashlib.sha1(data).hexdigest()}:{max_regions}"
-    if cache_key in cache:
-        return cache[cache_key]
-    image = _decode_image(data)
-    if image is None:
-        raise ValueError("无法解码图像")
-    prepared = prepare_multisegment(image, max_regions=max_regions)
-    cache[cache_key] = (prepared.normalized, prepared.region_map, prepared.automatic_thresholds)
-    while len(cache) > 16:
-        cache.pop(next(iter(cache)))
-    return cache[cache_key]
-
-
-def _unique_name(name: str, used: set[str]) -> str:
-    clean = Path(name).name or "image"
-    stem, suffix = os.path.splitext(clean)
-    candidate = clean
-    index = 2
-    while candidate.lower() in used:
-        candidate = f"{stem} ({index}){suffix}"
-        index += 1
-    used.add(candidate.lower())
-    return candidate
-
-
-def build_image_queue(uploaded_files: list[Any] | None) -> tuple[list[dict[str, Any]], list[str]]:
-    queue: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    used_names: set[str] = set()
-
-    def append_image(name: str, data: bytes, source: str) -> None:
-        if len(queue) >= MAX_QUEUE_IMAGES:
-            return
-        image = _decode_image(data)
-        if image is None:
-            warnings.append(f"{name} 无法识别，已跳过。")
-            return
-        display_name = _unique_name(name, used_names)
-        image_id = hashlib.sha1(display_name.encode("utf-8") + data[:65536]).hexdigest()
-        queue.append({"id": image_id, "name": display_name, "source": source, "data": data, "image": image.copy()})
-
-    for uploaded in uploaded_files or []:
-        data = uploaded.getvalue()
-        suffix = Path(uploaded.name).suffix.lower()
-        if suffix in IMAGE_EXTENSIONS:
-            append_image(uploaded.name, data, "直接上传")
-            continue
-        if suffix != ".zip":
-            warnings.append(f"{uploaded.name} 格式不受支持，已跳过。")
-            continue
-        try:
-            with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                for member in archive.infolist():
-                    if len(queue) >= MAX_QUEUE_IMAGES:
-                        warnings.append(f"队列最多保留 {MAX_QUEUE_IMAGES} 张图像，其余文件已跳过。")
-                        break
-                    if member.is_dir() or Path(member.filename).suffix.lower() not in IMAGE_EXTENSIONS:
-                        continue
-                    if member.file_size > MAX_ARCHIVE_MEMBER_BYTES:
-                        warnings.append(f"{member.filename} 超过单图 80 MiB 限制，已跳过。")
-                        continue
-                    append_image(member.filename, archive.read(member), f"{uploaded.name} / ZIP")
-        except (zipfile.BadZipFile, RuntimeError) as exc:
-            warnings.append(f"{uploaded.name} 读取失败：{exc}")
-    return queue, warnings
-
-
-def _safe_name(value: str) -> str:
-    value = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "-", value.strip()).strip("-")
-    return value[:48] or "默认多段标准"
-
-
-def _profile_files() -> list[Path]:
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted(PROFILE_DIR.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-
-
-def _load_profile(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 1:
-        raise ValueError("不支持的参数文件版本")
-    return payload
-
-
-def _save_profile(payload: dict[str, Any]) -> Path:
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    path = PROFILE_DIR / f"{_safe_name(payload['name'])}.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
-
-
-def _config_fingerprint(config: dict[str, Any]) -> str:
-    encoded = json.dumps(config, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()[:16]
-
-
-def _segment(image: np.ndarray, config: dict[str, Any]):
-    return segment_image(
-        image,
-        config["method"],
-        foreground_dark=config["foreground_dark"],
-        global_threshold=config["global_threshold"],
-        adaptive_block=config["adaptive_block"],
-        adaptive_c=config["adaptive_c"],
-        max_regions=config["max_regions"],
-        region_values=config["region_values"],
-        application_mode=config["application_mode"],
-        kernel_size=config["kernel_size"],
-        min_area=config["min_area"],
-    )
-
-
-def _segment_cached(data: bytes, config: dict[str, Any]):
-    cache = st.session_state.setdefault("_segmentation_result_cache", {})
-    cache_key = f"{hashlib.sha1(data).hexdigest()}:{_config_fingerprint(config)}"
-    if cache_key not in cache:
-        image = _decode_image(data)
-        if image is None:
-            raise ValueError("无法解码图像")
-        cache[cache_key] = _segment(image, config)
-        while len(cache) > 24:
-            cache.pop(next(iter(cache)))
-    return cache[cache_key]
-
-
-def _overlay(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    colored = image.copy()
-    colored[mask > 0] = (62, 201, 118)
-    return cv2.addWeighted(image, 0.60, colored, 0.40, 0)
-
-
-def _fit_for_display(image: np.ndarray, max_width: int, convert_bgr: bool = False) -> np.ndarray:
-    height, width = image.shape[:2]
-    shown = image
-    if width > max_width:
-        scale = max_width / width
-        shown = cv2.resize(image, (max_width, max(1, int(round(height * scale)))), interpolation=cv2.INTER_AREA)
-    if convert_bgr:
-        shown = cv2.cvtColor(shown, cv2.COLOR_BGR2RGB)
-    return shown
-
-
-def _result_board(image: np.ndarray, mask: np.ndarray, rate: float, name: str, description: str) -> np.ndarray:
-    height, width = image.shape[:2]
-    header_height = max(72, min(120, height // 8))
-    board = np.full((height + header_height, width * 2, 3), 24, dtype=np.uint8)
-    board[header_height:, :width] = image
-    board[header_height:, width:] = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-    cv2.putText(board, f"Slurry rate  {rate:.2f}%", (24, int(header_height * 0.48)), cv2.FONT_HERSHEY_SIMPLEX,
-                max(0.65, min(1.25, width / 900)), (111, 232, 178), 2, cv2.LINE_AA)
-    subtitle = f"{description}  |  {name}  |  Original / Foreground mask"
-    cv2.putText(board, subtitle[:120], (24, int(header_height * 0.80)), cv2.FONT_HERSHEY_SIMPLEX,
-                max(0.40, min(0.70, width / 1500)), (220, 226, 235), 1, cv2.LINE_AA)
-    cv2.line(board, (width, header_height), (width, height + header_height), (235, 235, 235), 2)
-    return board
-
-
-def _encode_image(image: np.ndarray, extension: str = ".jpg") -> bytes:
-    params = [cv2.IMWRITE_JPEG_QUALITY, 94] if extension == ".jpg" else []
-    ok, buffer = cv2.imencode(extension, image, params)
-    if not ok:
-        raise ValueError("图像编码失败")
-    return buffer.tobytes()
-
-
-def _result_csv(results: list[dict[str, Any]]) -> bytes:
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["文件名", "状态", "满浆率(%)", "算法"])
-    for result in results:
-        writer.writerow([result["name"], result["status"], result.get("rate", ""), result["algorithm"]])
-    return output.getvalue().encode("utf-8-sig")
-
-
-def _result_zip(paths: list[str]) -> bytes:
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        for raw_path in paths:
-            path = Path(raw_path)
-            if path.is_file():
-                archive.write(path, path.name)
-    return output.getvalue()
-
-
-def process_queue(queue: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path("temp") / f"batch_{timestamp}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    progress = st.progress(0.0)
-    status = st.empty()
-    results: list[dict[str, Any]] = []
-    saved_files: list[str] = []
-
-    parameters_path = output_dir / "analysis_parameters.json"
-    parameters_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    saved_files.append(str(parameters_path))
-    for index, item in enumerate(queue, start=1):
-        status.info(f"[{index}/{len(queue)}] 正在分析：{item['name']}")
-        try:
-            segmented = _segment_cached(item["data"], config)
-            rate = coverage_percent(segmented.mask)
-            stem = _safe_name(Path(item["name"]).stem)
-            result_image = _result_board(item["image"], segmented.mask, rate, item["name"], config["description"])
-            overlay = _overlay(item["image"], segmented.mask)
-            result_path = output_dir / f"{stem}_result.jpg"
-            overlay_path = output_dir / f"{stem}_overlay.jpg"
-            mask_path = output_dir / f"{stem}_mask.png"
-            cv2.imwrite(str(result_path), result_image)
-            cv2.imwrite(str(overlay_path), overlay)
-            cv2.imwrite(str(mask_path), segmented.mask)
-            saved_files.extend([str(result_path), str(overlay_path), str(mask_path)])
-            results.append({"id": item["id"], "name": item["name"], "status": "完成", "rate": round(rate, 2),
-                            "algorithm": config["algorithm_label"], "mask": segmented.mask, "result_path": str(result_path)})
-        except Exception as exc:
-            results.append({"id": item["id"], "name": item["name"], "status": f"失败：{exc}", "rate": None,
-                            "algorithm": config["algorithm_label"], "mask": None})
-        progress.progress(index / len(queue))
-    succeeded = sum(row["status"] == "完成" for row in results)
-    status.success(f"队列分析完成：{succeeded}/{len(queue)} 张成功")
-    return {"fingerprint": _config_fingerprint(config), "timestamp": timestamp, "output_dir": str(output_dir),
-            "results": results, "saved_files": saved_files}
-
-
-def _height_map(masks: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    first_height, first_width = masks[0].shape
-    scale = min(1.0, 150.0 / max(first_height, first_width))
-    target_width = max(24, int(round(first_width * scale)))
-    target_height = max(24, int(round(first_height * scale)))
-    hits = np.zeros((target_height, target_width), dtype=np.uint16)
-    for mask in masks:
-        resized = cv2.resize((mask > 0).astype(np.uint8), (target_width, target_height), interpolation=cv2.INTER_NEAREST)
-        hits += resized
-    return np.linspace(0, 100, target_width), np.linspace(0, 100, target_height), hits
-
-
-def render_3d_visualization(results: list[dict[str, Any]]) -> None:
-    valid = [result for result in results if result.get("mask") is not None]
-    if len(valid) < 2 or not st.toggle("查看 3D 前景命中高程", value=False, help="至少两张图完成分析后可用"):
-        return
-    try:
-        import plotly.graph_objects as go
-    except ImportError:
-        st.error("缺少 Plotly 依赖，请重新构建部署镜像。")
-        return
-    x, y, hits = _height_map([result["mask"] for result in valid])
-    hit_rate = hits.astype(np.float32) / len(valid) * 100.0
-    colorscale = [[0.00, "#0b1739"], [0.18, "#174ea6"], [0.42, "#15a7c8"],
-                  [0.68, "#48c78e"], [0.86, "#f0c95a"], [1.00, "#f36b45"]]
-    surface = go.Figure(data=[go.Surface(
-        x=x, y=y, z=hits, surfacecolor=hit_rate, colorscale=colorscale, cmin=0, cmax=100,
-        customdata=hit_rate, colorbar=dict(title="命中率 %", thickness=16, len=0.72),
-        hovertemplate="横向 %{x:.1f}%<br>纵向 %{y:.1f}%<br>命中 %{z} 张<br>命中率 %{customdata:.1f}%<extra></extra>",
-        contours={"z": {"show": True, "usecolormap": True, "project_z": True}},
-        lighting=dict(ambient=0.65, diffuse=0.75, specular=0.24, roughness=0.72))])
-    surface.update_layout(
-        title=dict(text=f"前景稳定性高程 · {len(valid)} 张图像", x=0.03), height=670,
-        margin=dict(l=0, r=0, t=65, b=0), paper_bgcolor="#ffffff",
-        scene=dict(bgcolor="#f6f8fb", xaxis=dict(title="图像横向位置 (%)", gridcolor="#dfe5ec"),
-                   yaxis=dict(title="图像纵向位置 (%)", gridcolor="#dfe5ec", autorange="reversed"),
-                   zaxis=dict(title="前景命中张数", range=[0, len(valid)], dtick=max(1, len(valid) // 5)),
-                   camera=dict(eye=dict(x=1.45, y=-1.55, z=1.15)), aspectmode="manual",
-                   aspectratio=dict(x=1.45, y=1.0, z=0.62)))
-    top_view = go.Figure(data=go.Heatmap(
-        x=x, y=y, z=hit_rate, colorscale=colorscale, zmin=0, zmax=100, colorbar=dict(title="命中率 %"),
-        hovertemplate="横向 %{x:.1f}%<br>纵向 %{y:.1f}%<br>命中率 %{z:.1f}%<extra></extra>"))
-    top_view.update_layout(title="俯视命中热力图", height=560, margin=dict(l=40, r=20, t=55, b=45),
-                           xaxis_title="图像横向位置 (%)", yaxis_title="图像纵向位置 (%)", yaxis_autorange="reversed")
-    tab_3d, tab_heat = st.tabs(["3D 高程", "俯视热力图"])
-    with tab_3d:
-        st.plotly_chart(surface, use_container_width=True, config={"displaylogo": False})
-    with tab_heat:
-        st.plotly_chart(top_view, use_container_width=True, config={"displaylogo": False})
-    st.caption("高程表示该位置被判定为前景的图像张数，颜色表示命中率。不同尺寸图像按归一化坐标对齐；只有拍摄视角和裁剪范围基本一致时，逐像素比较才有业务意义。")
-
-
-def _get_smtp_config() -> dict[str, Any] | None:
-    try:
-        config = st.secrets.get("smtp", None)
-    except Exception:
-        config = None
-    if not config or not all((config.get("host"), config.get("user"), config.get("password"))):
-        return None
-    return {"host": config["host"], "port": int(config.get("port", 587)), "user": config["user"],
-            "password": config["password"], "from": config.get("from", config["user"]), "tls": bool(config.get("tls", True))}
-
-
-def _record_feedback(kind: str, name: str, email: str, message: str, attachments: list[Any]) -> tuple[bool, str]:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    feedback_dir = Path("temp/feedback")
-    feedback_dir.mkdir(parents=True, exist_ok=True)
-    log_path = feedback_dir / "feedback_log.csv"
-    with log_path.open("a", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        if log_path.stat().st_size == 0:
-            writer.writerow(["timestamp", "type", "name", "email", "message", "platform", "python", "streamlit"])
-        writer.writerow([timestamp, kind, name, email, message, platform.platform(), platform.python_version(), st.__version__])
-    prepared: list[tuple[str, bytes]] = []
-    for index, uploaded in enumerate(attachments or [], start=1):
-        data = uploaded.getvalue()
-        filename = f"{timestamp}_{index}_{Path(uploaded.name).name}"
-        (feedback_dir / filename).write_bytes(data)
-        prepared.append((uploaded.name, data))
-    smtp = _get_smtp_config()
-    if not smtp:
-        return False, "反馈已保存到服务器；SMTP 未配置，因此未发送邮件。"
-    try:
-        mail = EmailMessage()
-        mail["Subject"], mail["From"], mail["To"] = f"满浆率工具使用反馈 - {kind}", smtp["from"], "guozhu_l@163.com"
-        mail.set_content(f"称呼：{name}\n邮箱：{email}\n\n{message}")
-        for filename, data in prepared:
-            content_type, _ = mimetypes.guess_type(filename)
-            main_type, sub_type = (content_type or "application/octet-stream").split("/", 1)
-            mail.add_attachment(data, maintype=main_type, subtype=sub_type, filename=filename)
-        with smtplib.SMTP(smtp["host"], smtp["port"], timeout=12) as server:
-            if smtp["tls"]:
-                server.starttls()
-            server.login(smtp["user"], smtp["password"])
-            server.send_message(mail)
-        return True, "反馈邮件已发送。"
-    except Exception as exc:
-        return False, f"反馈已保存到服务器；邮件发送失败：{exc}"
-
-
-# Page heading
-title_col, manual_col = st.columns([4, 1])
-with title_col:
-    st.title(APP_TITLE)
-    st.caption("统一图像队列 · 参数标准化 · 批量分析 · 多图 3D 稳定性观察")
-with manual_col:
-    st.write("")
-    show_manual = st.toggle("📖 使用手册", value=False)
-if show_manual:
-    try:
-        with st.expander("使用手册", expanded=True):
-            st.markdown(Path("user_manual.md").read_text(encoding="utf-8"))
-    except OSError as exc:
-        st.warning(f"使用手册读取失败：{exc}")
-st.markdown('<div class="step-strip">① 上传图像形成队列　→　② 选择自动或高级算法　→　③ 检查当前图预览　→　④ 分析整个队列　→　⑤ 下载结果或查看多图 3D</div>', unsafe_allow_html=True)
-
-# Unified sidebar
-st.sidebar.header("图像输入")
-uploaded_files = st.sidebar.file_uploader(
-    "上传图像或 ZIP", type=["jpg", "jpeg", "png", "bmp", "tif", "tiff", "zip"], accept_multiple_files=True,
-    help="可一次选择一张、多张图片，也可把图片 ZIP 与普通图片一起加入同一队列。")
-st.sidebar.caption("一个入口即可：1 张直接分析，多张自动进入图像队列并支持 3D 统计。")
-queue, queue_warnings = build_image_queue(uploaded_files)
-if queue:
-    st.sidebar.success(f"当前队列：{len(queue)} 张")
-else:
-    st.sidebar.info("尚未上传图像")
-
-st.sidebar.divider()
-st.sidebar.header("算法")
-algorithm_mode = st.sidebar.radio("算法模式", ["自动", "高级"], index=0, horizontal=True)
-method, algorithm_label = "otsu", "Otsu 自动阈值"
-global_threshold, adaptive_block, adaptive_c, max_regions = 160, 51, 3, 6
-application_mode, region_values, kernel_size, min_area = "fixed", {}, 5, None
-if algorithm_mode == "自动":
-    automatic_scheme = st.sidebar.selectbox("自动方案", ["Otsu 自动阈值", "多段式自动分割"],
-        help="光照均匀时优先使用 Otsu；存在明显阴影或亮度分区时可选择多段式。")
-    if automatic_scheme == "多段式自动分割":
-        method, algorithm_label = "multisegment", automatic_scheme
-        st.sidebar.caption("自动完成光照归一化、最多 6 个不规则分区及每区 Otsu。")
+# 添加收款码图片到侧边栏最下方
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 💝 支持开发")
+try:
+    qr_image_path = "img/赞赏码.jpg"
+    if os.path.exists(qr_image_path):
+        st.sidebar.image(qr_image_path, caption="如果这个工具对您有帮助，欢迎赞赏支持！", width="stretch")
     else:
-        st.sidebar.caption("无需调节阈值，适合光照与背景较均匀的图像。")
-else:
-    advanced_algorithm = st.sidebar.selectbox("高级算法", ["全局阈值", "自适应阈值", "Otsu 自动阈值", "多段式分割"])
-    method = {"全局阈值": "global", "自适应阈值": "adaptive", "Otsu 自动阈值": "otsu", "多段式分割": "multisegment"}[advanced_algorithm]
-    algorithm_label = advanced_algorithm
-    if method == "global":
-        global_threshold = st.sidebar.slider("灰度阈值", 0, 255, 160)
-    elif method == "adaptive":
-        adaptive_block = st.sidebar.slider("局部窗口", 3, 151, 51, step=2)
-        adaptive_c = st.sidebar.slider("局部偏移 C", -30, 30, 3)
-    elif method == "multisegment":
-        max_regions = st.sidebar.slider("最大分区数", 2, 6, 6, key="multi_max_regions")
-        mode_label = st.sidebar.radio("批处理应用方式", ["固定阈值", "相对自动阈值偏移"], key="multi_application_mode",
-            help="固定阈值强调同一标准；相对偏移会先在每张图自动计算，再应用相同修正量。")
-        application_mode = "fixed" if mode_label == "固定阈值" else "relative"
-        profiles = _profile_files()
-        if profiles:
-            profile_by_name = {path.stem: path for path in profiles}
-            selected_profile = st.sidebar.selectbox("已保存参数标准", list(profile_by_name))
-            if st.sidebar.button("加载所选标准", use_container_width=True):
-                try:
-                    st.session_state["pending_multisegment_profile"] = _load_profile(profile_by_name[selected_profile])
-                    st.rerun()
-                except Exception as exc:
-                    st.sidebar.error(f"加载失败：{exc}")
-    with st.sidebar.expander("后处理参数"):
-        kernel_size = st.slider("平滑核尺寸", 3, 11, 5, step=2)
-        min_area = st.number_input("最小前景连通区（像素）", min_value=1, max_value=500000, value=64, step=16)
+        st.sidebar.info("💡 如果这个工具对您有帮助，欢迎支持开发！")
+except Exception:
+    st.sidebar.info("💡 如果这个工具对您有帮助，欢迎支持开发！")
 
-tile_type = st.sidebar.selectbox("材料对比", ["黑胶白砖", "白胶黑砖"])
-foreground_dark = tile_type == "黑胶白砖"
-description = st.sidebar.text_input("测试项描述", value="满浆率检测")
-st.sidebar.divider()
-with st.sidebar.expander("📸 拍摄与队列提示", expanded=True):
-    st.markdown("- 镜头尽量与砖面平行，避免透视变形。\n- 裁剪范围、方向和分辨率尽量一致。\n- 保证光线充足，避免硬阴影和反光。\n- 3D 命中统计要求多张图的空间位置可比较。")
+# ========== 使用反馈 ==========
+def _get_smtp_config():
+    cfg = None
+    try:
+        cfg = st.secrets.get("smtp", None)
+    except Exception:
+        cfg = None
+    if not cfg:
+        return None
+    host = cfg.get("host")
+    port = int(cfg.get("port", 587))
+    user = cfg.get("user")
+    password = cfg.get("password")
+    from_addr = cfg.get("from", user)
+    use_tls = bool(cfg.get("tls", True))
+    if host and port and user and password and from_addr:
+        return {
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "from": from_addr,
+            "tls": use_tls,
+        }
+    return None
 
-for warning in queue_warnings:
-    st.warning(warning)
+def _send_feedback_email(subject, body_text, to_addr, attachments=None):
+    attachments = attachments or []
+    smtp_cfg = _get_smtp_config()
+    if not smtp_cfg:
+        return False, "SMTP未配置（st.secrets['smtp']），已写入本地日志。"
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = smtp_cfg["from"]
+        msg["To"] = to_addr
+        msg.set_content(body_text)
 
-if not queue:
-    st.info("请从左侧上传一张或多张图片。系统会自动建立纵向图像队列，不再要求选择‘单图/批量’入口。")
-else:
-    valid_ids = {item["id"] for item in queue}
-    if st.session_state["selected_image_id"] not in valid_ids:
-        st.session_state["selected_image_id"] = queue[0]["id"]
-    selected = next(item for item in queue if item["id"] == st.session_state["selected_image_id"])
-    if "profile_loaded_notice" in st.session_state:
-        st.success(f"已加载参数标准：{st.session_state.pop('profile_loaded_notice')}")
+        for att in attachments:
+            name, data = att
+            ctype, _ = mimetypes.guess_type(name)
+            if ctype is None:
+                ctype = "application/octet-stream"
+            maintype, subtype = ctype.split("/", 1)
+            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
 
-    if method == "multisegment" and algorithm_mode == "高级":
-        _, selected_regions, automatic_thresholds = _prepare_multi_cached(selected["data"], max_regions)
-        region_count = len(automatic_thresholds)
-        with st.expander("多段式分区参数标准", expanded=True):
-            st.caption("分区按光照残差由暗到亮编号。每个分区可独立设定阈值；保存后，整队分析和以后上传的图像都会按相同编号复用。")
-            refresh_col, note_col = st.columns([1, 3])
-            with refresh_col:
-                use_auto = st.button("用当前图自动值填充", use_container_width=True)
-            with note_col:
-                st.caption(f"当前参考图：{selected['name']} · 实际识别 {region_count} 个分区")
-            prefix = "multi_fixed" if application_mode == "fixed" else "multi_relative"
-            if use_auto:
-                for region_id, auto_value in enumerate(automatic_thresholds):
-                    st.session_state[f"{prefix}_{max_regions}_{region_id}"] = int(round(auto_value)) if application_mode == "fixed" else 0
-                st.rerun()
-            region_values = {}
-            control_columns = st.columns(2)
-            for region_id, automatic in enumerate(automatic_thresholds):
-                key = f"{prefix}_{max_regions}_{region_id}"
-                default = int(round(automatic)) if application_mode == "fixed" else 0
-                if key not in st.session_state:
-                    st.session_state[key] = default
-                with control_columns[region_id % 2]:
-                    if application_mode == "fixed":
-                        value = st.slider(f"分区 {region_id + 1} · 固定阈值", 0, 255, key=key,
-                            help=f"当前参考图自动阈值：{automatic:.1f}")
-                        st.caption(f"参考自动值 {automatic:.1f} · 实际使用 {value}")
-                    else:
-                        value = st.slider(f"分区 {region_id + 1} · 阈值偏移", -60, 60, key=key,
-                            help=f"每张图先计算自动阈值，再叠加该偏移；参考自动值 {automatic:.1f}")
-                        st.caption(f"参考自动值 {automatic:.1f} · 参考实际值 {np.clip(automatic + value, 0, 255):.1f}")
-                    region_values[region_id] = float(value)
-            profile_name = st.text_input("参数标准名称", value="默认多段标准", key="profile_name")
-            profile_payload = {"schema_version": 1, "name": _safe_name(profile_name),
-                "created_or_updated_at": datetime.now().isoformat(timespec="seconds"), "max_regions": max_regions,
-                "application_mode": application_mode, "region_values": {str(key): value for key, value in region_values.items()},
-                "reference_image": selected["name"], "foreground_dark": foreground_dark}
-            save_profile_col, download_profile_col = st.columns(2)
-            with save_profile_col:
-                if st.button("保存/更新参数标准", type="primary", use_container_width=True):
-                    st.success(f"已保存：{_save_profile(profile_payload)}")
-            with download_profile_col:
-                st.download_button("下载参数 JSON", json.dumps(profile_payload, ensure_ascii=False, indent=2).encode("utf-8"),
-                    file_name=f"{profile_payload['name']}.json", mime="application/json", use_container_width=True)
+        with smtplib.SMTP(smtp_cfg["host"], smtp_cfg["port"]) as server:
+            if smtp_cfg["tls"]:
+                server.starttls()
+            server.login(smtp_cfg["user"], smtp_cfg["password"])
+            server.send_message(msg)
+        return True, "反馈邮件已发送"
+    except Exception as e:
+        return False, f"邮件发送失败：{e}"
 
-    config = {"algorithm_mode": algorithm_mode, "algorithm_label": algorithm_label, "method": method,
-        "foreground_dark": foreground_dark, "tile_type": tile_type, "global_threshold": int(global_threshold),
-        "adaptive_block": int(adaptive_block), "adaptive_c": int(adaptive_c), "max_regions": int(max_regions),
-        "application_mode": application_mode, "region_values": region_values, "kernel_size": int(kernel_size),
-        "min_area": int(min_area) if min_area is not None else None, "description": description}
-    fingerprint = _config_fingerprint(config)
-    preview = _segment_cached(selected["data"], config)
-    preview_rate = coverage_percent(preview.mask)
+def _save_feedback_log(entry, attachments=None):
+    try:
+        os.makedirs("temp/feedback", exist_ok=True)
+        log_path = os.path.join("temp/feedback", "feedback_log.csv")
+        header_needed = not os.path.exists(log_path)
+        with open(log_path, "a", encoding="utf-8") as f:
+            if header_needed:
+                f.write("timestamp,type,name,email,message,platform,python_version,streamlit_version\n")
+            f.write(
+                f"{entry['timestamp']},{entry['type']},{entry['name']},{entry['email']},"
+                f"{entry['message'].replace(',', ';')},{entry['platform']},{entry['python_version']},{entry['st_version']}\n"
+            )
+        # 保存附件（如果有）
+        ts = entry["timestamp"]
+        for idx, att in enumerate(attachments or []):
+            name, data = att
+            safe_name = f"{ts}_{idx+1}_{os.path.basename(name)}"
+            with open(os.path.join("temp/feedback", safe_name), "wb") as af:
+                af.write(data)
+        return True
+    except Exception:
+        return False
 
-    action_col, count_col, algorithm_col, rate_col = st.columns([1.45, 0.8, 1.4, 0.8])
-    with action_col:
-        analyze_clicked = st.button(f"▶ 分析整个队列（{len(queue)} 张）", type="primary", use_container_width=True)
-    with count_col:
-        st.metric("队列", f"{len(queue)} 张")
-    with algorithm_col:
-        st.metric("当前算法", algorithm_label)
-    with rate_col:
-        st.metric("当前图预览", f"{preview_rate:.2f}%")
-    if analyze_clicked:
-        st.session_state["analysis_bundle"] = process_queue(queue, config)
-
-    bundle = st.session_state.get("analysis_bundle")
-    current_results = bool(bundle and bundle.get("fingerprint") == fingerprint)
-    result_by_id = {result["id"]: result for result in (bundle.get("results", []) if current_results else [])}
-    if bundle and not current_results:
-        st.warning("算法或参数已经变化，下面缓存的是旧结果。请重新分析整个队列后再进行 3D 对比或下载。")
-
-    queue_column, preview_column = st.columns([1.05, 3.4], gap="large")
-    with queue_column:
-        st.subheader("纵向图像浏览器")
-        st.markdown('<div class="queue-hint">点击任一缩略图切换当前预览；整队分析始终使用同一套参数。</div>', unsafe_allow_html=True)
-        for index, item in enumerate(queue, start=1):
-            is_selected = item["id"] == selected["id"]
-            st.image(_fit_for_display(item["image"], 360, convert_bgr=True), use_column_width=True)
-            result = result_by_id.get(item["id"])
-            st.button(f"{'●' if is_selected else '○'} {index}. {item['name']}", key=f"select_{item['id']}",
-                use_container_width=True, on_click=lambda image_id=item["id"]: st.session_state.update(selected_image_id=image_id))
-            if result and result.get("rate") is not None:
-                st.caption(f"满浆率 {result['rate']:.2f}% · 已完成")
-            else:
-                height, width = item["image"].shape[:2]
-                st.caption(f"{width} × {height} · {item['source']}")
-            st.divider()
-
-    with preview_column:
-        st.subheader(f"当前图像 · {selected['name']}")
-        compare_tab, overlay_tab, details_tab = st.tabs(["原图与掩码", "前景叠加", "分析详情"])
-        with compare_tab:
-            original_col, mask_col = st.columns(2)
-            with original_col:
-                st.image(_fit_for_display(selected["image"], 1200, convert_bgr=True), caption="原图", use_column_width=True)
-            with mask_col:
-                st.image(_fit_for_display(preview.mask, 1200), caption="前景掩码（白色计入满浆）", use_column_width=True, clamp=True)
-        with overlay_tab:
-            st.image(_fit_for_display(_overlay(selected["image"], preview.mask), 1200, convert_bgr=True),
-                caption="绿色区域为当前识别前景", use_column_width=True)
-        with details_tab:
-            detail_col_1, detail_col_2, detail_col_3 = st.columns(3)
-            detail_col_1.metric("满浆率", f"{preview_rate:.2f}%")
-            detail_col_2.metric("前景像素", f"{np.count_nonzero(preview.mask):,}")
-            detail_col_3.metric("总像素", f"{preview.mask.size:,}")
-            if preview.region_map is not None:
-                region_rgb = colorize_regions(preview.region_map)
-                region_blend = cv2.addWeighted(cv2.cvtColor(selected["image"], cv2.COLOR_BGR2RGB), 0.56, region_rgb, 0.44, 0)
-                st.image(_fit_for_display(region_blend, 1200), caption="多段式不规则分区", use_column_width=True)
-                region_rows = []
-                for region_id, applied in enumerate(preview.applied_thresholds or []):
-                    selector = preview.region_map == region_id
-                    region_rows.append({"分区": region_id + 1, "面积占比": f"{np.mean(selector) * 100:.2f}%",
-                        "自动阈值": f"{preview.automatic_thresholds[region_id]:.1f}", "实际阈值": f"{applied:.1f}",
-                        "分区前景率": f"{np.mean(preview.mask[selector] > 0) * 100:.2f}%"})
-                st.dataframe(region_rows, use_container_width=True, hide_index=True)
-        current_board = _result_board(selected["image"], preview.mask, preview_rate, selected["name"], description)
-        current_stem = _safe_name(Path(selected["name"]).stem)
-        download_col, save_col = st.columns(2)
-        with download_col:
-            st.download_button("📥 下载当前结果图", _encode_image(current_board), file_name=f"{current_stem}_result.jpg",
-                mime="image/jpeg", use_container_width=True)
-        with save_col:
-            if st.button("💾 保存当前结果到服务器", use_container_width=True):
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                path = Path("temp") / f"{current_stem}_result_{timestamp}.jpg"
-                cv2.imwrite(str(path), current_board)
-                st.success(f"已保存：{path}")
-
-    if current_results:
-        st.divider()
-        st.subheader("队列分析结果")
-        table_rows = [{"文件名": result["name"], "状态": result["status"], "满浆率(%)": result.get("rate"),
-                       "算法": result["algorithm"]} for result in bundle["results"]]
-        st.dataframe(table_rows, use_container_width=True, hide_index=True)
-        csv_col, zip_col, clear_col = st.columns(3)
-        with csv_col:
-            st.download_button("📄 下载结果 CSV", _result_csv(bundle["results"]),
-                file_name=f"batch_results_{bundle['timestamp']}.csv", mime="text/csv", use_container_width=True)
-        with zip_col:
-            st.download_button("📦 下载全部结果 ZIP", _result_zip(bundle["saved_files"]),
-                file_name=f"batch_outputs_{bundle['timestamp']}.zip", mime="application/zip", type="primary", use_container_width=True)
-        with clear_col:
-            if st.button("清空分析结果", use_container_width=True):
-                st.session_state["analysis_bundle"] = None
-                st.rerun()
-        if len(queue) >= 2:
-            st.divider()
-            st.subheader("多图空间稳定性")
-            render_3d_visualization(bundle["results"])
-
-    if method == "multisegment":
-        st.info("多段式算法来自仓库实验方案，适合探索光照不均场景；现有基准没有人工标注真值。正式质量判定前，建议用已标注样本确认阈值标准和可接受误差。")
-
-# Feedback and support
-st.sidebar.divider()
-with st.sidebar.expander("💬 使用反馈"):
-    with st.form("feedback_form", clear_on_submit=True):
-        feedback_type = st.selectbox("反馈类型", ["功能建议", "问题报告", "界面体验", "其他"])
-        feedback_name = st.text_input("您的称呼（可选）")
-        feedback_email = st.text_input("联系邮箱（可选）")
-        feedback_message = st.text_area("反馈内容", placeholder="请描述使用场景、操作步骤和期望结果")
-        feedback_images = st.file_uploader("上传截图（可选）", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="feedback_images")
-        feedback_submitted = st.form_submit_button("发送反馈")
-    if feedback_submitted:
-        if len(feedback_message.strip()) < 5:
-            st.warning("请填写至少 5 个字符的反馈内容。")
+with st.sidebar.expander("💬 使用反馈", expanded=False):
+    with st.form("feedback_form"):
+        fb_type = st.selectbox("反馈类型", ["功能建议", "问题报告", "界面体验", "其他"], index=0)
+        fb_name = st.text_input("您的称呼（可选）")
+        fb_email = st.text_input("联系邮箱（可选）")
+        fb_msg = st.text_area("反馈内容", placeholder="请尽量详细描述使用场景、步骤和期望效果")
+        fb_imgs = st.file_uploader("上传截图（可选，支持多张）", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+        submitted = st.form_submit_button("发送反馈")
+    if submitted:
+        if not fb_msg or len(fb_msg.strip()) < 5:
+            st.warning("请填写更完整的反馈内容（至少5个字符）。")
         else:
-            sent, feedback_status = _record_feedback(feedback_type, feedback_name, feedback_email,
-                                                      feedback_message.strip(), feedback_images)
-            if sent:
-                st.success(feedback_status)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            sys_info = f"平台: {platform.platform()}\nPython: {platform.python_version()}\nStreamlit: {st.__version__}"
+            subject = f"满浆率工具使用反馈 - {fb_type}"
+            body = (
+                f"时间: {ts}\n类型: {fb_type}\n称呼: {fb_name}\n联系邮箱: {fb_email}\n\n"
+                f"反馈内容:\n{fb_msg}\n\n{sys_info}\n"
+            )
+            atts = []
+            for f in fb_imgs or []:
+                try:
+                    atts.append((f.name, f.read()))
+                except Exception:
+                    continue
+
+            entry = {
+                "timestamp": ts,
+                "type": fb_type,
+                "name": fb_name.replace(',', ';'),
+                "email": fb_email.replace(',', ';'),
+                "message": fb_msg.strip(),
+                "platform": platform.platform(),
+                "python_version": platform.python_version(),
+                "st_version": st.__version__,
+            }
+
+            ok, msg = _send_feedback_email(subject, body, "guozhu_l@163.com", attachments=atts)
+            _save_feedback_log(entry, atts)
+            if ok:
+                st.success("✅ 反馈已发送，感谢您的支持！")
             else:
-                st.warning(feedback_status)
-support_image = Path("img/赞赏码.jpg")
-if support_image.exists():
-    with st.sidebar.expander("💝 支持开发"):
-        st.image(str(support_image), caption="感谢支持", use_column_width=True)
+                st.warning(f"⚠️ {msg}")
+
+# ========== 二值化函数 ==========
+def binarize(img, algo, val, roi_mask=None):
+    """
+    输入：
+      img: OpenCV BGR image (np.ndarray)
+      algo: 算法名
+      val: 阈值/参数
+      roi_mask: GrabCut 的 ROI mask (0/1)
+    返回：
+      binary: 单通道 uint8 二值图 (0 或 255)
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # 默认兜底
+    binary = np.zeros_like(gray)
+
+    if algo == "全局阈值":
+        _, binary = cv2.threshold(gray, val, 255, cv2.THRESH_BINARY)
+
+    elif algo == "Otsu":
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    elif algo == "自适应阈值":
+        # blockSize 必须为奇数且 >=3
+        bs = val if (val % 2 == 1 and val >= 3) else max(3, (val // 2) * 2 + 1)
+        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                       cv2.THRESH_BINARY, blockSize=bs, C=2)
+
+    elif algo == "K-means 聚类":
+        st.info("K-means 聚类算法需要安装 sklearn，已跳过。")
+        # try:
+        #     Z = gray.reshape((-1, 1)).astype(np.float32)
+        #     from sklearn.cluster import KMeans  # 可能没有安装 sklearn
+        #     kmeans = KMeans(n_clusters=2, n_init=10).fit(Z)
+        #     labels = kmeans.labels_.reshape(gray.shape)
+        #     # 把聚类标签映射为 0/255；为了可读性把类 1 映为 255
+        #     binary = (labels.astype(np.uint8) * 255)
+        # except Exception as e:
+        #     st.warning("K-means 聚类失败（可能未安装 sklearn），已返回全黑图像。")
+        #     binary = np.zeros_like(gray)
+
+    elif algo == "GrabCut 交互式":
+        mask = np.zeros(img.shape[:2], np.uint8)
+        bgdModel = np.zeros((1, 65), np.float64)
+        fgdModel = np.zeros((1, 65), np.float64)
+
+        if roi_mask is not None:
+            ys, xs = np.where(roi_mask == 1)
+            if len(xs) > 0 and len(ys) > 0:
+                # rect 格式为 (x, y, w, h)
+                rect = (int(xs.min()), int(ys.min()), int(xs.max() - xs.min()), int(ys.max() - ys.min()))
+                # 为防止 rect 非法，做最小值校验
+                if rect[2] <= 0 or rect[3] <= 0:
+                    binary = np.zeros_like(gray)
+                else:
+                    try:
+                        cv2.grabCut(img, mask, rect, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_RECT)
+                        mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype("uint8")
+                        binary = (mask2 * 255).astype("uint8")
+                    except Exception as e:
+                        st.warning(f"GrabCut 运行失败: {e}")
+                        binary = np.zeros_like(gray)
+            else:
+                binary = np.zeros_like(gray)
+        else:
+            binary = np.zeros_like(gray)
+
+    return binary
+
+
+# ========== 结果图生成函数 ==========
+def create_result_image(original_img, binary_img, slurry_rate, filename, test_description="满浆率检测"):
+    """
+    创建结果图：原图和二值化图并排显示，并在图上绘制满浆率信息
+    
+    参数：
+      original_img: 原始图像 (BGR)
+      binary_img: 二值化图像 (单通道)
+      slurry_rate: 满浆率百分比
+      filename: 原始文件名
+      test_description: 测试项描述
+    
+    返回：
+      result_img: 组合后的结果图像 (BGR)
+    """
+    # 将二值化图转为三通道
+    binary_bgr = cv2.cvtColor(binary_img, cv2.COLOR_GRAY2BGR)
+    
+    # 获取图像尺寸
+    h, w = original_img.shape[:2]
+    
+    # 创建组合图像：左边原图，右边二值化图
+    result_img = np.zeros((h, w * 2, 3), dtype=np.uint8)
+    result_img[:, :w] = original_img
+    result_img[:, w:] = binary_bgr
+    
+    # 使用PIL绘制支持中文的文本信息
+    from PIL import Image, ImageDraw, ImageFont
+    
+    # 将OpenCV图像转换为PIL图像
+    pil_img = Image.fromarray(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    
+    # 设置字体大小 - 使用固定基准大小，不依赖图像尺寸
+    base_font_size = 32  # 基准字体大小
+    # 可选：根据图像大小进行适度调整，但设置更合理的范围
+    font_size = max(28, min(base_font_size + (w - 800) // 100, 48))
+    
+    # 跨平台字体加载
+    import platform
+    import os
+    
+    font = None
+    system = platform.system()
+    
+    # 定义不同系统的字体路径和字体文件
+    font_paths = []
+    if system == "Windows":
+        font_paths = [
+            "C:/Windows/Fonts/msyh.ttc",  # 微软雅黑
+            "C:/Windows/Fonts/simsun.ttc",  # 宋体
+            "C:/Windows/Fonts/arial.ttf",  # Arial
+        ]
+    elif system == "Darwin":  # macOS
+        font_paths = [
+            "/System/Library/Fonts/PingFang.ttc",  # 苹方
+            "/System/Library/Fonts/Arial.ttf",  # Arial
+            "/System/Library/Fonts/Helvetica.ttc",  # Helvetica
+        ]
+    else:  # Linux (包括云端部署环境)
+        font_paths = [
+            # 常见的Linux字体路径
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # DejaVu Sans
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",  # Liberation Sans
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",  # Noto Sans CJK
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",  # Noto Sans CJK (备用路径)
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",  # Ubuntu字体
+            "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf",  # Droid Sans Fallback
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",  # 文泉驿微米黑
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",  # 文泉驿正黑
+            # 云端部署环境可能的字体路径
+            "/app/.fonts/NotoSansCJK-Regular.ttc",  # 自定义字体目录
+            "/tmp/fonts/NotoSansCJK-Regular.ttc",  # 临时字体目录
+            # 更多备用选项
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
+            "/System/Library/Fonts/Arial.ttf",  # 某些Linux发行版可能有
+        ]
+    
+    # 尝试加载字体
+    for font_path in font_paths:
+        try:
+            if os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, font_size)
+                break
+        except Exception:
+            continue
+    
+    # 如果所有字体都加载失败，使用默认字体
+    if font is None:
+        font = ImageFont.load_default()
+    
+    # 文本内容
+    text_lines = [
+        f"Test: {test_description}",
+        f"File: {filename}",
+        f"Slurry Rate: {slurry_rate:.2f}%",
+        f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    ]
+    
+    # 计算文本位置（在图像底部）
+    line_height = font_size + 5
+    y_start = h - len(text_lines) * line_height - 10
+    
+    # 绘制黑色背景矩形
+    bg_height = len(text_lines) * line_height + 10
+    # draw.rectangle([(0, y_start - 5), (w * 2, h)], fill=(0, 0, 0, 180))
+    
+    # 绘制文本
+    for i, text in enumerate(text_lines):
+        y_pos = y_start + i * line_height
+        draw.text((10, y_pos), text, font=font, fill=(255, 255, 255))
+    
+    # 将PIL图像转换回OpenCV格式
+    result_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    
+    # 在中间绘制分割线
+    cv2.line(result_img, (w, 0), (w, h), (255, 255, 255), 2)
+    
+    # 使用PIL添加标签
+    pil_img_labels = Image.fromarray(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
+    draw_labels = ImageDraw.Draw(pil_img_labels)
+    
+    # 设置标签字体 - 使用固定基准大小
+    base_label_font_size = 36  # 标签基准字体大小
+    label_font_size = max(32, min(base_label_font_size + (w - 800) // 80, 52))
+    
+    # 跨平台标签字体加载
+    label_font = None
+    
+    # 尝试加载字体
+    for font_path in font_paths:
+        try:
+            if os.path.exists(font_path):
+                label_font = ImageFont.truetype(font_path, label_font_size)
+                break
+        except Exception:
+            continue
+    
+    # 如果所有字体都加载失败，使用默认字体
+    if label_font is None:
+        label_font = ImageFont.load_default()
+    
+    # 添加标签
+    draw_labels.text((10, 10), "Original", font=label_font, fill=(255, 0, 0))
+    draw_labels.text((w + 10, 10), "Binary", font=label_font, fill=(0, 255, 0))
+    
+    # 转换回OpenCV格式
+    result_img = cv2.cvtColor(np.array(pil_img_labels), cv2.COLOR_RGB2BGR)
+
+    return result_img
+
+
+# ========== 处理与显示 ==========
+if input_mode == "单文件":
+    if uploaded_file is not None:
+        # 读取图像
+        file_bytes = np.frombuffer(uploaded_file.read(), np.uint8)
+        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        if img is None:
+            st.error("无法解码上传的图像，请确认文件完整且为 jpg/png/bmp。")
+            st.stop()
+
+        roi_mask = None
+        if algo == "GrabCut 交互式":
+            st.subheader("请在画布上绘制 ROI（矩形框）")
+
+            # 转为 PIL.Image（RGB）传给 canvas；canvas 内部会调用我们 monkey-patch 的 image_to_url
+            bg_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+
+            canvas = st_canvas(
+                fill_color="rgba(255,0,0,0.3)",
+                stroke_color="red",
+                stroke_width=2,
+                background_image=bg_img,
+                update_streamlit=True,
+                height=img.shape[0],
+                width=img.shape[1],
+                drawing_mode="rect",
+                key="canvas",
+            )
+
+            # st_canvas 可能返回 None（取决于组件版本），先做健壮性检查
+            if canvas is not None and getattr(canvas, "json_data", None) is not None:
+                objects = canvas.json_data.get("objects", [])
+                if len(objects) > 0:
+                    obj = objects[0]
+                    # 注意：fabric.js 的 left/top/width/height 可能为浮点，转换为 int
+                    x, y, w, h = int(obj.get("left", 0)), int(obj.get("top", 0)), int(obj.get("width", 0)), int(obj.get("height", 0))
+                    # 防越界
+                    x = max(0, x); y = max(0, y)
+                    w = max(0, min(w, img.shape[1] - x))
+                    h = max(0, min(h, img.shape[0] - y))
+                    roi_mask = np.zeros(img.shape[:2], np.uint8)
+                    roi_mask[y:y+h, x:x+w] = 1
+
+        # 二值化
+        binary = binarize(img, algo, thresh_val, roi_mask)
+
+        # 满浆率计算（白色像素视作满浆）
+        if tile_type == "黑胶白砖":
+            # 业务：白胶黑砖时，先反转，使满浆部分变为白色（255）
+            binary = cv2.bitwise_not(binary)
+
+        # 显示前后对比（streamlit_image_comparison 需要安装）
+        try:
+            image_comparison(
+                img1=img[:, :, ::-1],  # BGR->RGB
+                img2=cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB),
+                label1="Before",
+                label2="After"
+            )
+        except Exception:
+            # 退回到简单显示
+            st.image(img[:, :, ::-1], caption="Before", width="stretch")
+            st.image(cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB), caption="After", width="stretch")
+
+        total_pixels = binary.size
+        if total_pixels == 0:
+            st.error("图像尺寸异常，无法计算。")
+            st.stop()
+
+        slurry_pixels = int(np.sum(binary == 255))
+        full_slurry_rate = slurry_pixels / total_pixels * 100
+
+        st.markdown("---")
+        st.subheader("结果指标")
+        st.metric(label="满浆率 (%)", value=f"{full_slurry_rate:.2f}")
+
+        # 生成结果图
+        input_filename = uploaded_file.name
+        result_img = create_result_image(img, binary, full_slurry_rate, input_filename, test_description)
+        
+        # 显示结果图
+        st.subheader("结果图")
+        st.image(result_img[:, :, ::-1], caption="原图与二值化结果对比", width="stretch")
+        
+        # 保存和下载功能
+        col1, col2, col3 = st.columns([1, 1, 3])
+        
+        # 生成结果图数据
+        input_filename = uploaded_file.name
+        base_name = os.path.splitext(input_filename)[0]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_filename = f"{base_name}_result_{timestamp}.jpg"
+        
+        # 将结果图编码为字节数据
+        _, buffer = cv2.imencode('.jpg', result_img)
+        img_bytes = buffer.tobytes()
+        
+        with col1:
+            # 直接下载按钮（推荐）
+            st.download_button(
+                label="📥 下载结果图",
+                data=img_bytes,
+                file_name=save_filename,
+                mime="image/jpeg",
+                type="primary",
+                help="直接下载到浏览器默认下载文件夹"
+            )
+        
+        with col2:
+            # 保存到服务器temp目录的按钮
+            if st.button("💾 保存到服务器", help="保存到应用服务器的temp目录"):
+                save_path = os.path.join("temp", save_filename)
+                os.makedirs("temp", exist_ok=True)
+                
+                success = cv2.imwrite(save_path, result_img)
+                if success:
+                    st.success(f"✅ 已保存至服务器: {save_path}")
+                else:
+                    st.error("❌ 保存失败，请检查文件路径权限")
+        
+        with col3:
+            st.write("")  # 占位符
+
+        # 可视化：把二值 mask 以半透明红色叠加到原图上
+        try:
+            overlay = img.copy()
+            mask_bool = (binary == 255)
+            overlay[mask_bool] = (0, 255, 0)  # 绿色 BGR
+            blended = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
+            
+            # 在叠加图上绘制文本信息（使用PIL支持中文）
+            h, w = blended.shape[:2]
+            
+            # 使用PIL绘制支持中文的文本信息
+            from PIL import Image, ImageDraw, ImageFont
+            
+            # 将OpenCV图像转换为PIL图像
+            pil_img = Image.fromarray(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(pil_img)
+            
+            # 设置字体大小 - 使用固定基准大小，不依赖图像尺寸
+            base_font_size = 32  # 基准字体大小
+            # 可选：根据图像大小进行适度调整，但设置更合理的范围
+            font_size = max(28, min(base_font_size + (w - 800) // 100, 48))
+            
+            # 跨平台叠加图字体加载
+            overlay_font = None
+            
+            # 重新定义字体路径（因为之前的font_paths在函数作用域外）
+            import platform
+            system = platform.system()
+            
+            # 定义不同系统的字体路径和字体文件
+            overlay_font_paths = []
+            if system == "Windows":
+                overlay_font_paths = [
+                    "C:/Windows/Fonts/msyh.ttc",  # 微软雅黑
+                    "C:/Windows/Fonts/simsun.ttc",  # 宋体
+                    "C:/Windows/Fonts/arial.ttf",  # Arial
+                ]
+            elif system == "Darwin":  # macOS
+                overlay_font_paths = [
+                    "/System/Library/Fonts/PingFang.ttc",  # 苹方
+                    "/System/Library/Fonts/Arial.ttf",  # Arial
+                    "/System/Library/Fonts/Helvetica.ttc",  # Helvetica
+                ]
+            else:  # Linux (包括云端部署环境)
+                overlay_font_paths = [
+                    # 常见的Linux字体路径
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # DejaVu Sans
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",  # Liberation Sans
+                    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",  # Noto Sans CJK
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",  # Noto Sans CJK (备用路径)
+                    "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",  # Ubuntu字体
+                    "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf",  # Droid Sans Fallback
+                    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",  # 文泉驿微米黑
+                    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",  # 文泉驿正黑
+                    # 云端部署环境可能的字体路径
+                    "/app/.fonts/NotoSansCJK-Regular.ttc",  # 自定义字体目录
+                    "/tmp/fonts/NotoSansCJK-Regular.ttc",  # 临时字体目录
+                    # 更多备用选项
+                    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                    "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
+                    "/System/Library/Fonts/Arial.ttf",  # 某些Linux发行版可能有
+                ]
+            
+            # 尝试加载字体
+            for font_path in overlay_font_paths:
+                try:
+                    if os.path.exists(font_path):
+                        overlay_font = ImageFont.truetype(font_path, font_size)
+                        break
+                except Exception:
+                    continue
+            
+            # 如果所有字体都加载失败，使用默认字体
+            if overlay_font is None:
+                overlay_font = ImageFont.load_default()
+            
+            font = overlay_font  # 保持原变量名兼容性
+            
+            # 文本内容
+            text_lines = [
+                f"Test: {test_description}",
+                f"File: {uploaded_file.name}",
+                f"Slurry Rate: {full_slurry_rate:.2f}%",
+                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            ]
+            
+            # 计算文本位置（在图像底部）
+            line_height = font_size + 5
+            y_start = h - len(text_lines) * line_height - 10
+            
+            # 绘制黑色背景矩形
+            bg_height = len(text_lines) * line_height + 10
+            # draw.rectangle([(0, y_start - 5), (w, h)], fill=(0, 0, 0, 180))
+            
+            # 绘制文本
+            for i, text in enumerate(text_lines):
+                y_pos = y_start + i * line_height
+                draw.text((10, y_pos), text, font=font, fill=(255, 255, 255))
+            
+            # 将PIL图像转换回OpenCV格式
+            blended = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+            
+            st.image(blended[:, :, ::-1], caption="满浆掩码叠加 (半透明红)", width="stretch")
+            
+            # 为叠加图添加下载按钮
+            # 使用原图文件名作为前缀，保持与原图一致
+            overlay_filename = f"{base_name}_overlay_{timestamp}.jpg"
+            
+            # 将叠加图编码为字节数据
+            overlay_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
+            overlay_pil = Image.fromarray(overlay_rgb)
+            overlay_buffer = io.BytesIO()
+            overlay_pil.save(overlay_buffer, format='JPEG', quality=95)
+            overlay_bytes = overlay_buffer.getvalue()
+            
+            # 创建两列布局
+            col1_overlay, col2_overlay, col3_overlay = st.columns([1, 1, 2])
+            
+            with col1_overlay:
+                # 直接下载按钮（推荐）
+                st.download_button(
+                    label="📥 下载叠加图",
+                    data=overlay_bytes,
+                    file_name=overlay_filename,
+                    mime="image/jpeg",
+                    type="secondary",
+                    help="直接下载叠加图到浏览器默认下载文件夹"
+                )
+            
+            with col2_overlay:
+                # 保存到服务器temp目录的按钮
+                if st.button("💾 保存到服务器", help="保存叠加图到应用服务器的temp目录"):
+                    save_path = os.path.join("temp", overlay_filename)
+                    os.makedirs("temp", exist_ok=True)
+                    
+                    success = cv2.imwrite(save_path, blended)
+                    if success:
+                        st.success(f"✅ 叠加图已保存至服务器: {save_path}")
+                    else:
+                        st.error("❌ 叠加图保存失败，请检查文件路径权限")
+            
+            with col3_overlay:
+                st.write("")  # 占位符
+                
+        except Exception as e:
+            st.error(f"❌ 叠加图生成失败: {str(e)}")
+            st.error("请检查图像处理过程中是否出现错误")
+    else:
+        st.info("请在左侧上传图像以开始。")
+
+else:
+    # 批量上传（多文件或ZIP），适用于部署环境，无需服务器路径
+    if not batch_images and not batch_zip and st.session_state["batch_results"] is None:
+        st.info("请上传多张图片或ZIP压缩包后点击“开始批处理”。")
+    elif not start_batch and st.session_state["batch_results"] is None:
+        if batch_images:
+            st.info(f"检测到 {len(batch_images)} 个待处理图像。点击左侧“开始批处理”。")
+        elif batch_zip:
+            st.info(f"已选择 ZIP：{batch_zip.name}。点击左侧“开始批处理”。")
+    elif start_batch:
+        # 收集待处理图像
+        valid_exts = {".jpg", ".jpeg", ".png", ".bmp"}
+        items = []  # [(filename, img)]
+        if batch_images:
+            for f in batch_images:
+                try:
+                    data = f.read()
+                    arr = np.frombuffer(data, np.uint8)
+                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if img is not None:
+                        items.append((f.name, img))
+                except Exception:
+                    continue
+        elif batch_zip:
+            try:
+                import zipfile
+                zf = zipfile.ZipFile(io.BytesIO(batch_zip.read()))
+                names = [n for n in zf.namelist() if os.path.splitext(n)[1].lower() in valid_exts]
+                for n in names:
+                    try:
+                        data = zf.read(n)
+                        arr = np.frombuffer(data, np.uint8)
+                        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            items.append((os.path.basename(n), img))
+                    except Exception:
+                        continue
+            except Exception as e:
+                st.error(f"ZIP读取失败：{e}")
+
+        if len(items) == 0:
+            st.warning("未找到可处理图像。请确认上传的文件为JPG/PNG/BMP格式。")
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = os.path.join("temp", f"batch_{timestamp}")
+            os.makedirs(output_dir, exist_ok=True)
+
+            st.subheader("批处理进度")
+            progress = st.progress(0)
+            status = st.empty()
+
+            results = []
+            saved_files = []
+
+            for idx, (fname, img) in enumerate(items, start=1):
+                if img is None:
+                    results.append({"文件名": fname, "状态": "读取失败", "满浆率(%)": None})
+                    status.warning(f"[{idx}/{len(items)}] 读取失败：{fname}")
+                    progress.progress(idx/len(items))
+                    continue
+
+                binary = binarize(img, algo, thresh_val, roi_mask=None)
+
+                if tile_type == "黑胶白砖":
+                    binary = cv2.bitwise_not(binary)
+
+                total_pixels = binary.size
+                if total_pixels == 0:
+                    results.append({"文件名": fname, "状态": "尺寸异常", "满浆率(%)": None})
+                    status.error(f"[{idx}/{len(items)}] 尺寸异常：{fname}")
+                    progress.progress(idx/len(items))
+                    continue
+
+                slurry_pixels = int(np.sum(binary == 255))
+                rate = slurry_pixels / total_pixels * 100.0
+
+                result_img = create_result_image(img, binary, rate, fname, test_description)
+
+                base_name = os.path.splitext(fname)[0]
+                save_filename = f"{base_name}_result_{timestamp}.jpg"
+                save_path = os.path.join(output_dir, save_filename)
+                cv2.imwrite(save_path, result_img)
+                saved_files.append(save_path)
+
+                # 叠加图保存
+                try:
+                    overlay = img.copy()
+                    mask_bool = (binary == 255)
+                    overlay[mask_bool] = (0, 255, 0)
+                    blended = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
+                    overlay_name = f"{base_name}_overlay_{timestamp}.jpg"
+                    overlay_path = os.path.join(output_dir, overlay_name)
+                    cv2.imwrite(overlay_path, blended)
+                    saved_files.append(overlay_path)
+                except Exception:
+                    pass
+
+                results.append({"文件名": fname, "状态": "完成", "满浆率(%)": f"{rate:.2f}"})
+                status.info(f"[{idx}/{len(items)}] 完成：{fname}（满浆率 {rate:.2f}%）")
+                progress.progress(idx/len(items))
+
+            st.success(f"批处理完成，共处理 {len(items)} 张。输出目录：{output_dir}")
+            # 将结果保存在会话状态，避免下载按钮触发重渲染后丢失
+            st.session_state["batch_results"] = results
+            st.session_state["batch_saved_files"] = saved_files
+            st.session_state["batch_timestamp"] = timestamp
+            st.session_state["batch_output_dir"] = output_dir
+
+            # 渲染结果（首次）
+            st.subheader("批处理结果")
+            st.dataframe(results, use_container_width=True)
+
+            csv_lines = ["文件名,满浆率(%)"]
+            for r in results:
+                if r["满浆率(%)"] is not None:
+                    csv_lines.append(f"{r['文件名']},{r['满浆率(%)']}")
+            csv_bytes = ("\n".join(csv_lines)).encode("utf-8-sig")
+            st.download_button(
+                label="📄 下载结果CSV",
+                data=csv_bytes,
+                file_name=f"batch_results_{timestamp}.csv",
+                mime="text/csv",
+            )
+
+            zip_buffer = io.BytesIO()
+            import zipfile as _zipfile
+            with _zipfile.ZipFile(zip_buffer, "w", _zipfile.ZIP_DEFLATED) as zf:
+                for p in saved_files:
+                    zf.write(p, os.path.basename(p))
+            zip_bytes = zip_buffer.getvalue()
+            st.download_button(
+                label="📦 下载所有结果ZIP",
+                data=zip_bytes,
+                file_name=f"batch_outputs_{timestamp}.zip",
+                mime="application/zip",
+                type="primary",
+                help="包含所有结果图与叠加图"
+            )
+
+            # 提供重置按钮以清空会话状态
+            if st.button("🧹 清空批处理结果"):
+                st.session_state["batch_results"] = None
+                st.session_state["batch_saved_files"] = None
+                st.session_state["batch_timestamp"] = None
+                st.session_state["batch_output_dir"] = None
+                st.experimental_rerun()
+
+    else:
+        # 未再次点击开始，但已有批处理结果：继续展示下载按钮，避免消失
+        if st.session_state["batch_results"]:
+            results = st.session_state["batch_results"]
+            saved_files = st.session_state["batch_saved_files"] or []
+            timestamp = st.session_state["batch_timestamp"] or datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = st.session_state["batch_output_dir"] or "temp"
+
+            st.success(f"批处理结果已缓存（输出目录：{output_dir}）")
+            st.subheader("批处理结果")
+            st.dataframe(results, use_container_width=True)
+
+            csv_lines = ["文件名,满浆率(%)"]
+            for r in results:
+                if r["满浆率(%)"] is not None:
+                    csv_lines.append(f"{r['文件名']},{r['满浆率(%)']}")
+            csv_bytes = ("\n".join(csv_lines)).encode("utf-8-sig")
+            st.download_button(
+                label="📄 下载结果CSV",
+                data=csv_bytes,
+                file_name=f"batch_results_{timestamp}.csv",
+                mime="text/csv",
+            )
+
+            zip_buffer = io.BytesIO()
+            import zipfile as _zipfile
+            with _zipfile.ZipFile(zip_buffer, "w", _zipfile.ZIP_DEFLATED) as zf:
+                for p in saved_files:
+                    try:
+                        zf.write(p, os.path.basename(p))
+                    except Exception:
+                        continue
+            zip_bytes = zip_buffer.getvalue()
+            st.download_button(
+                label="📦 下载所有结果ZIP",
+                data=zip_bytes,
+                file_name=f"batch_outputs_{timestamp}.zip",
+                mime="application/zip",
+                type="primary",
+                help="包含所有结果图与叠加图"
+            )
+
+            if st.button("🧹 清空批处理结果"):
+                st.session_state["batch_results"] = None
+                st.session_state["batch_saved_files"] = None
+                st.session_state["batch_timestamp"] = None
+                st.session_state["batch_output_dir"] = None
+                st.experimental_rerun()
