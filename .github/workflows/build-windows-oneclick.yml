@@ -55,6 +55,15 @@ jobs:
           path: build-oneclick.log
           if-no-files-found: warn
 
+      - name: Attach build log to summary
+        if: always() && hashFiles('build-oneclick.log') != ''
+        shell: pwsh
+        run: |
+          "## 一键打包执行日志（前 100 行）" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "```text" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Get-Content build-oneclick.log | Select-Object -First 100 | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "```" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
