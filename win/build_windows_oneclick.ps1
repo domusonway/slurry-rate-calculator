@@ -30,17 +30,25 @@ function Resolve-PythonCommand {
 function Invoke-Python {
     param(
         [Parameter(Mandatory = $true)]
-        [string[]]$Arguments
+        [object[]]$Arguments
     )
 
-    $callArgs = [string[]]@()
+    $callArgs = New-Object System.Collections.Generic.List[string]
     if ($pythonCmd.Count -gt 1) {
-        $callArgs = @($pythonCmd[1..($pythonCmd.Count - 1)]) + [string[]]$Arguments
-    } else {
-        $callArgs = [string[]]$Arguments
+        foreach ($arg in $pythonCmd[1..($pythonCmd.Count - 1)]) {
+            [void]$callArgs.Add([string]$arg)
+        }
     }
 
-    & $pythonCmd[0] @callArgs
+    if ($Arguments -is [string]) {
+        [void]$callArgs.Add([string]$Arguments)
+    } else {
+        foreach ($arg in $Arguments) {
+            [void]$callArgs.Add([string]$arg)
+        }
+    }
+
+    & $pythonCmd[0] @($callArgs.ToArray())
 
     if ($LASTEXITCODE -ne 0) {
         throw "Python 命令执行失败，退出码：$LASTEXITCODE，命令：$($pythonCmd[0]) $($callArgs -join ' ')"
