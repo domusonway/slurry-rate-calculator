@@ -39,7 +39,8 @@ function Resolve-PythonCommand {
 function Invoke-Python {
     param(
         [Parameter(Mandatory = $true)]
-        [object[]]$Arguments
+        [object[]]$Arguments,
+        [switch]$CaptureOutput = $false
     )
 
     $callArgs = New-Object System.Collections.Generic.List[string]
@@ -60,28 +61,19 @@ function Invoke-Python {
         [void]$callArgs.Add($argText)
     }
 
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $pythonCmd.Exe
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    foreach ($arg in $callArgs) {
-        [void]$psi.ArgumentList.Add([string]$arg)
+    if ($CaptureOutput) {
+        $output = & $pythonCmd.Exe @($callArgs.ToArray()) 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw "Python 命令执行失败，退出码：$LASTEXITCODE，命令：$($pythonCmd.Exe) $($callArgs -join ' ')"
+        }
+        return $output.Trim()
     }
 
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
+    & $pythonCmd.Exe @($callArgs.ToArray())
 
-    if ($stdout) { Write-Output $stdout.TrimEnd() }
-    if ($stderr) { Write-Output $stderr.TrimEnd() }
-
-    if ($proc.ExitCode -ne 0) {
-        throw "Python 命令执行失败，退出码：$($proc.ExitCode)，命令：$($pythonCmd.Exe) $($callArgs -join ' ')"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python 命令执行失败，退出码：$LASTEXITCODE，命令：$($pythonCmd.Exe) $($callArgs -join ' ')"
     }
-
-    return $stdout
 }
 
 function Require-PythonVersion {
@@ -91,7 +83,7 @@ function Require-PythonVersion {
             $pythonVersionArgs = $pythonCmd.Args
         }
         $pythonVersionArgs += "--version"
-        $verText = Invoke-Python -Arguments $pythonVersionArgs
+        $verText = Invoke-Python -Arguments $pythonVersionArgs -CaptureOutput
         $verText = $verText.Trim()
         $verText = ($verText -split "`r?`n")[0].Trim()
         if (-not $verText) {
