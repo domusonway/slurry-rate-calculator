@@ -30,6 +30,7 @@ jobs:
       - name: Build one-click package
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
           .\win\build_windows_oneclick.ps1 2>&1 | Tee-Object -FilePath dist\build-oneclick.log
 
       - name: Upload build log
