@@ -11,14 +11,14 @@ $packageDir = Join-Path $distRoot "slurry-rate-calculator-windows-oneclick"
 $zipPath = Join-Path $distRoot "slurry-rate-calculator-windows-oneclick.zip"
 
 function Resolve-PythonCommand {
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        return @("py", "-3")
-    }
     if (Get-Command python3 -ErrorAction SilentlyContinue) {
         return @("python3")
     }
     if (Get-Command python -ErrorAction SilentlyContinue) {
         return @("python")
+    }
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        return @("py", "-3")
     }
     throw "未检测到 Python。请先安装 Python 3.11+（可直接执行 start.bat 使用 Python 回退版）。"
 }
@@ -64,7 +64,7 @@ if (-not $SkipBuild) {
     Invoke-Python @("-m", "pip", "install", "pyinstaller", "streamlit", "opencv-python-headless", "numpy", "streamlit-image-comparison", "streamlit-drawable-canvas")
 
     Write-Output "开始生成 One-File 可执行文件..."
-    Invoke-Python @(
+    $pyInstallerArgs = @(
         "-m", "PyInstaller",
         "--noconfirm",
         "--clean",
@@ -73,11 +73,30 @@ if (-not $SkipBuild) {
         "--windowed",
         "--collect-all", "streamlit",
         "--add-data", ((Join-Path $root "img") + ";img"),
-        "--add-data", ((Join-Path $root ".streamlit") + ";.streamlit"),
-        "--add-data", ((Join-Path $root "user_manual.md") + ";."),
         "--hidden-import", "cv2",
         "app.py"
     )
+
+    $imgDir = Join-Path $root "img"
+    if (-not (Test-Path $imgDir)) {
+        throw "打包缺失资源目录：$imgDir"
+    }
+
+    $streamlitDir = Join-Path $root ".streamlit"
+    if (Test-Path $streamlitDir) {
+        $pyInstallerArgs += @("--add-data", ($streamlitDir + ";.streamlit"))
+    } else {
+        Write-Warning ".streamlit 目录不存在，跳过 add-data 处理"
+    }
+
+    $manualFile = Join-Path $root "user_manual.md"
+    if (Test-Path $manualFile) {
+        $pyInstallerArgs += @("--add-data", ($manualFile + ";."))
+    } else {
+        Write-Warning "user_manual.md 不存在，跳过 add-data 处理"
+    }
+
+    Invoke-Python @($pyInstallerArgs)
 }
 
 $exePath = Join-Path $root "dist\SlurryRateCalculator.exe"
@@ -93,8 +112,12 @@ New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
 Copy-Item -Path $exePath -Destination (Join-Path $packageDir "SlurryRateCalculator.exe") -Force
 Copy-Item -Path (Join-Path $root "app.py") -Destination $packageDir -Force
 Copy-Item -Path (Join-Path $root "requirements.txt") -Destination $packageDir -Force
-Copy-Item -Path (Join-Path $root "user_manual.md") -Destination $packageDir -Force
-Copy-Item -Path (Join-Path $root ".streamlit") -Destination (Join-Path $packageDir ".streamlit") -Recurse -Force
+if (Test-Path (Join-Path $root "user_manual.md")) {
+    Copy-Item -Path (Join-Path $root "user_manual.md") -Destination $packageDir -Force
+}
+if (Test-Path (Join-Path $root ".streamlit")) {
+    Copy-Item -Path (Join-Path $root ".streamlit") -Destination (Join-Path $packageDir ".streamlit") -Recurse -Force
+}
 Copy-Item -Path (Join-Path $root "img") -Destination (Join-Path $packageDir "img") -Recurse -Force
 Copy-Item -Path (Join-Path $root "win\start.bat") -Destination $packageDir -Force
 Copy-Item -Path (Join-Path $root "win\quickstart.bat") -Destination $packageDir -Force
