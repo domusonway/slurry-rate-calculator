@@ -30,8 +30,19 @@ jobs:
       - name: Build one-click package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          .\win\build_windows_oneclick.ps1 2>&1 | Tee-Object -FilePath build-oneclick.log
+          $ErrorActionPreference = "Stop"
+          $LogPath = "build-oneclick.log"
+          if (Test-Path $LogPath) { Remove-Item $LogPath -Force }
+          New-Item -ItemType File -Path $LogPath -Force | Out-Null
+          try {
+            .\win\build_windows_oneclick.ps1 2>&1 | Tee-Object -FilePath $LogPath -Append
+            if ($LASTEXITCODE -ne 0) {
+              throw "Build command exited with code $LASTEXITCODE"
+            }
+          } catch {
+            $_ | Out-String | Tee-Object -FilePath $LogPath -Append
+            throw
+          }
 
       - name: Upload build log
         if: always()
