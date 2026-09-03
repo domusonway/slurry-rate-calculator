@@ -63,7 +63,12 @@ jobs:
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           if ($summaryFile) {
             $lines = Get-Content build-oneclick.log | Select-Object -First 100
-            $summaryLines = @("## 一键打包执行日志（前 100 行）", "```text") + $lines + "```"
+            $summaryLines = @(
+              "## 一键打包执行日志（前 100 行）",
+              "---",
+              $lines,
+              "---"
+            )
             Set-Content -Path $summaryFile -Value $summaryLines -Encoding utf8
           }
 

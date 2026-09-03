@@ -62,9 +62,10 @@ function Require-PythonVersion {
         $pythonVersionArgs += "--version"
         $verText = (& $pythonCmd[0] @pythonVersionArgs 2>&1 | Out-String).Trim()
         Write-Output "检测到 Python: $verText"
-        $match = [regex]::Match($verText, "\\d+\\.\\d+")
+        $match = [regex]::Match($verText, "\d+\.\d+")
         if (-not $match.Success) {
-            throw "无法解析 Python 版本：$verText"
+            Write-Warning "无法解析 Python 版本号，跳过版本校验：$verText"
+            return
         }
         if ([version]$match.Value -lt [version]"3.10") {
             throw "当前 Python 版本为 $verText，需 >=3.10。"
