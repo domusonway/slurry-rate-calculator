@@ -39,17 +39,15 @@ function Invoke-Python {
 }
 
 function Require-PythonVersion {
-    $versionScript = "import sys; print('.'.join(map(str, sys.version_info[:2])))"
-    if ($pythonCmd.Count -le 1) {
-        $verText = Invoke-Python @("-c", $versionScript)
-    } else {
-        $verText = Invoke-Python @($pythonCmd[1], "-c", $versionScript)
-    }
-    if (-not $verText) {
-        throw "无法获取 Python 版本。"
-    }
-    if ([version]$verText -lt [version]"3.10") {
-        throw "当前 Python 版本为 $verText，需 >=3.10。"
+    try {
+        $pythonArgs = @()
+        if ($pythonCmd.Count -gt 1) {
+            $pythonArgs = @($pythonCmd[1])
+        }
+        $pythonArgs += "--version"
+        & $pythonCmd[0] @pythonArgs
+    } catch {
+        throw "Python 可执行不可用：$($pythonCmd -join ' ')"
     }
 }
 
