@@ -51,11 +51,28 @@ function Invoke-Python {
         [void]$callArgs.Add($argText)
     }
 
-    & $pythonCmd[0] @($callArgs.ToArray())
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Python 命令执行失败，退出码：$LASTEXITCODE，命令：$($pythonCmd[0]) $($callArgs -join ' ')"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $pythonCmd[0]
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    foreach ($arg in $callArgs) {
+        [void]$psi.ArgumentList.Add([string]$arg)
     }
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+
+    if ($stdout) { Write-Output $stdout.TrimEnd() }
+    if ($stderr) { Write-Output $stderr.TrimEnd() }
+
+    if ($proc.ExitCode -ne 0) {
+        throw "Python 命令执行失败，退出码：$($proc.ExitCode)，命令：$($pythonCmd[0]) $($callArgs -join ' ')"
+    }
+
+    return $stdout
 }
 
 function Require-PythonVersion {
@@ -65,7 +82,8 @@ function Require-PythonVersion {
             $pythonVersionArgs = $pythonCmd[1..($pythonCmd.Count - 1)]
         }
         $pythonVersionArgs += "--version"
-        $verText = (& $pythonCmd[0] @pythonVersionArgs 2>&1 | Out-String).Trim()
+        $verText = Invoke-Python -Arguments $pythonVersionArgs
+        $verText = $verText.Trim()
         $verText = ($verText -split "`r?`n")[0].Trim()
         if (-not $verText) {
             Write-Warning "未获取到 Python 版本输出，跳过版本校验（继续构建）。"
