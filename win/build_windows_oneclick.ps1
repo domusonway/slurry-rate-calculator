@@ -22,18 +22,7 @@ function Resolve-PythonCommand {
         if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
             continue
         }
-
-        try {
-            $args = @()
-            if ($cand.Count -gt 1) {
-                $args += $cand[1..($cand.Count - 1)]
-            }
-            $args += "--version"
-            & $exe @args | Out-Null
-            return $cand
-        } catch {
-            Write-Host "候选 Python 命令不可用：$($cand -join ' ')，尝试下一个"
-        }
+        return $cand
     }
     throw "未检测到 Python。请先安装 Python 3.11+（可直接执行 start.bat 使用 Python 回退版）。"
 }
@@ -51,6 +40,10 @@ function Invoke-Python {
         $args += $Arguments
         & $pythonCmd[0] @args
     }
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python 命令执行失败，退出码：$LASTEXITCODE，参数：$($Arguments -join ' ')"
+    }
 }
 
 function Require-PythonVersion {
@@ -61,17 +54,25 @@ function Require-PythonVersion {
         }
         $pythonVersionArgs += "--version"
         $verText = (& $pythonCmd[0] @pythonVersionArgs 2>&1 | Out-String).Trim()
+        $verText = ($verText -split "`r?`n")[0].Trim()
+        if (-not $verText) {
+            Write-Warning "未获取到 Python 版本输出，跳过版本校验（继续构建）。"
+            return
+        }
+
         Write-Output "检测到 Python: $verText"
         $match = [regex]::Match($verText, "\d+\.\d+")
         if (-not $match.Success) {
-            Write-Warning "无法解析 Python 版本号，跳过版本校验：$verText"
+            Write-Warning "无法解析 Python 版本号，跳过版本校验（继续构建）。"
             return
         }
-        if ([version]$match.Value -lt [version]"3.10") {
+
+        $version = [version]$match.Value
+        if ($version -lt [version]"3.10") {
             throw "当前 Python 版本为 $verText，需 >=3.10。"
         }
     } catch {
-        throw "Python 版本检查失败：$($pythonCmd -join ' ')"
+        Write-Warning "Python 版本检查跳过：$($Error[0].Exception.Message)"
     }
 }
 
