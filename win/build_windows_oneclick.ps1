@@ -22,7 +22,16 @@ function Resolve-PythonCommand {
         if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
             continue
         }
-        return $cand
+        if ($cand.Count -gt 1) {
+            return [pscustomobject]@{
+                Exe = $exe
+                Args = $cand[1..($cand.Count - 1)]
+            }
+        }
+        return [pscustomobject]@{
+            Exe = $exe
+            Args = @()
+        }
     }
     throw "未检测到 Python。请先安装 Python 3.11+（可直接执行 start.bat 使用 Python 回退版）。"
 }
@@ -34,8 +43,8 @@ function Invoke-Python {
     )
 
     $callArgs = New-Object System.Collections.Generic.List[string]
-    if ($pythonCmd.Count -gt 1) {
-        foreach ($arg in $pythonCmd[1..($pythonCmd.Count - 1)]) {
+    if ($pythonCmd.Args.Count -gt 0) {
+        foreach ($arg in $pythonCmd.Args) {
             [void]$callArgs.Add([string]$arg)
         }
     }
@@ -52,7 +61,7 @@ function Invoke-Python {
     }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $pythonCmd[0]
+    $psi.FileName = $pythonCmd.Exe
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -69,7 +78,7 @@ function Invoke-Python {
     if ($stderr) { Write-Output $stderr.TrimEnd() }
 
     if ($proc.ExitCode -ne 0) {
-        throw "Python 命令执行失败，退出码：$($proc.ExitCode)，命令：$($pythonCmd[0]) $($callArgs -join ' ')"
+        throw "Python 命令执行失败，退出码：$($proc.ExitCode)，命令：$($pythonCmd.Exe) $($callArgs -join ' ')"
     }
 
     return $stdout
@@ -78,8 +87,8 @@ function Invoke-Python {
 function Require-PythonVersion {
     try {
         $pythonVersionArgs = @()
-        if ($pythonCmd.Count -gt 1) {
-            $pythonVersionArgs = $pythonCmd[1..($pythonCmd.Count - 1)]
+        if ($pythonCmd.Args.Count -gt 0) {
+            $pythonVersionArgs = $pythonCmd.Args
         }
         $pythonVersionArgs += "--version"
         $verText = Invoke-Python -Arguments $pythonVersionArgs
@@ -107,7 +116,7 @@ function Require-PythonVersion {
 }
 
 $pythonCmd = Resolve-PythonCommand
-Write-Output "使用 Python: $($pythonCmd -join ' ')"
+Write-Output "使用 Python: $($pythonCmd.Exe) $($pythonCmd.Args -join ' ')"
 Require-PythonVersion
 
 New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
