@@ -31,14 +31,14 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          .\win\build_windows_oneclick.ps1 2>&1 | Tee-Object -FilePath dist\build-oneclick.log
+          .\win\build_windows_oneclick.ps1 2>&1 | Tee-Object -FilePath build-oneclick.log
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-oneclick-log
-          path: dist\build-oneclick.log
+          path: build-oneclick.log
           if-no-files-found: warn
 
       - name: Upload artifact
