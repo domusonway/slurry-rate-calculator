@@ -33,16 +33,17 @@ function Invoke-Python {
         [string[]]$Arguments
     )
 
-    if ($pythonCmd.Count -le 1) {
-        & $pythonCmd[0] @Arguments
+    $callArgs = [string[]]@()
+    if ($pythonCmd.Count -gt 1) {
+        $callArgs = @($pythonCmd[1..($pythonCmd.Count - 1)]) + [string[]]$Arguments
     } else {
-        $args = @($pythonCmd[1..($pythonCmd.Count - 1)])
-        $args += $Arguments
-        & $pythonCmd[0] @args
+        $callArgs = [string[]]$Arguments
     }
 
+    & $pythonCmd[0] @callArgs
+
     if ($LASTEXITCODE -ne 0) {
-        throw "Python 命令执行失败，退出码：$LASTEXITCODE，参数：$($Arguments -join ' ')"
+        throw "Python 命令执行失败，退出码：$LASTEXITCODE，命令：$($pythonCmd[0]) $($callArgs -join ' ')"
     }
 }
 
@@ -84,8 +85,8 @@ New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
 
 if (-not $SkipBuild) {
     Write-Output "安装/升级 PyInstaller..."
-    Invoke-Python @("-m", "pip", "install", "--upgrade", "pip")
-    Invoke-Python @("-m", "pip", "install", "pyinstaller", "streamlit", "opencv-python-headless", "numpy", "streamlit-image-comparison", "streamlit-drawable-canvas")
+    Invoke-Python -Arguments @("-m", "pip", "install", "--upgrade", "pip")
+    Invoke-Python -Arguments @("-m", "pip", "install", "pyinstaller", "streamlit", "opencv-python-headless", "numpy", "streamlit-image-comparison", "streamlit-drawable-canvas")
 
     Write-Output "开始生成 One-File 可执行文件..."
     $pyInstallerArgs = @(
@@ -120,7 +121,7 @@ if (-not $SkipBuild) {
         Write-Warning "user_manual.md 不存在，跳过 add-data 处理"
     }
 
-    Invoke-Python @($pyInstallerArgs)
+    Invoke-Python -Arguments $pyInstallerArgs
 }
 
 $exePath = Join-Path $root "dist\SlurryRateCalculator.exe"
