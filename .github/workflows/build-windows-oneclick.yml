@@ -30,7 +30,15 @@ jobs:
       - name: Build one-click package
         shell: pwsh
         run: |
-          .\win\build_windows_oneclick.ps1
+          .\win\build_windows_oneclick.ps1 2>&1 | Tee-Object -FilePath dist\build-oneclick.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-oneclick-log
+          path: dist\build-oneclick.log
+          if-no-files-found: warn
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
