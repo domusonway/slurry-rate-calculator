@@ -40,12 +40,15 @@ function Invoke-Python {
         }
     }
 
-    if ($Arguments -is [string]) {
-        [void]$callArgs.Add([string]$Arguments)
-    } else {
-        foreach ($arg in $Arguments) {
-            [void]$callArgs.Add([string]$arg)
+    foreach ($arg in $Arguments) {
+        if ($arg -is [char[]]) {
+            $argText = [string]::new($arg)
+        } elseif (($arg -is [System.Array]) -and -not ($arg -is [string])) {
+            $argText = $arg -join ''
+        } else {
+            $argText = [string]$arg
         }
+        [void]$callArgs.Add($argText)
     }
 
     & $pythonCmd[0] @($callArgs.ToArray())
