@@ -63,13 +63,8 @@ jobs:
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           if ($summaryFile) {
             $lines = Get-Content build-oneclick.log | Select-Object -First 100
-            $content = @(
-              "## 一键打包执行日志（前 100 行）"
-              "```text"
-              $lines
-              "```"
-            )
-            $content -join "`n" | Out-File -Encoding utf8 -FilePath $summaryFile
+            $summaryLines = @("## 一键打包执行日志（前 100 行）", "```text") + $lines + "```"
+            Set-Content -Path $summaryFile -Value $summaryLines -Encoding utf8
           }
 
       - name: Upload artifact
