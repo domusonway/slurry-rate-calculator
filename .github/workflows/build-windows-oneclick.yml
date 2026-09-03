@@ -40,7 +40,10 @@ jobs:
               throw "Build command exited with code $LASTEXITCODE"
             }
           } catch {
-            $_ | Out-String | Tee-Object -FilePath $LogPath -Append
+            $err = $_ | Out-String
+            $errEscaped = $err.Replace("%", "%%").Replace("`r", "").Replace("`n", "%0A")
+            Write-Host "::error ::$errEscaped"
+            $err | Tee-Object -FilePath $LogPath -Append
             throw
           }
 
