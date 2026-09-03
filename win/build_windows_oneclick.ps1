@@ -39,10 +39,11 @@ function Invoke-Python {
 }
 
 function Require-PythonVersion {
+    $versionScript = "import sys; print('.'.join(map(str, sys.version_info[:2])))"
     if ($pythonCmd.Count -le 1) {
-        $verText = & $pythonCmd[0] "-c" "import sys; print('.'.join(map(str, sys.version_info[:2])))"
+        $verText = Invoke-Python @("-c", $versionScript)
     } else {
-        $verText = & $pythonCmd[0] $pythonCmd[1] "-c" "import sys; print('.'.join(map(str, sys.version_info[:2])))"
+        $verText = Invoke-Python @($pythonCmd[1], "-c", $versionScript)
     }
     if (-not $verText) {
         throw "无法获取 Python 版本。"
